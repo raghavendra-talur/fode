@@ -727,6 +727,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-shell",
+ "tokio",
  "tree-sitter",
  "tree-sitter-go",
  "tree-sitter-javascript",

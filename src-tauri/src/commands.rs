@@ -30,19 +30,27 @@ pub struct RelatedEntity {
 }
 
 #[tauri::command]
-pub fn open_repo(path: String, state: State<AppState>) -> Result<RepoInfo, String> {
+pub async fn open_repo(path: String, state: State<'_, AppState>) -> Result<RepoInfo, String> {
     let repo_path = PathBuf::from(&path);
     if !repo_path.exists() {
         return Err(format!("Path does not exist: {}", path));
     }
 
-    let (info, graph) = parser::parse_repo(&repo_path)
-        .ok_or_else(|| "Failed to parse repository. No supported language files found.".to_string())?;
+    eprintln!("[fode] open_repo command called with: {}", path);
+
+    // Run parsing on a blocking thread so we don't freeze the UI
+    let (info, graph) = tokio::task::spawn_blocking(move || {
+        parser::parse_repo(&repo_path)
+    })
+    .await
+    .map_err(|e| format!("Parse task failed: {}", e))?
+    .ok_or_else(|| "Failed to parse repository. No supported language files found.".to_string())?;
 
     *state.repo_info.lock().unwrap() = Some(info.clone());
     *state.entity_graph.lock().unwrap() = Some(graph);
-    *state.repo_path.lock().unwrap() = Some(repo_path);
+    *state.repo_path.lock().unwrap() = Some(PathBuf::from(&path));
 
+    eprintln!("[fode] open_repo complete: {} entities", info.total_entities);
     Ok(info)
 }
 

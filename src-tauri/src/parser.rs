@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tree_sitter::{Language, Parser, Tree};
 use walkdir::WalkDir;
@@ -476,19 +476,19 @@ pub fn extract_entities_generic(
     entities
 }
 
-pub fn extract_references(source: &str, tree: &Tree, entities: &[Entity]) -> Vec<Relation> {
+/// Extract references from entities in a single file.
+/// `file_entities` should only contain entities from this file.
+/// `all_entity_names` is a global name->id lookup across the whole repo.
+pub fn extract_references(
+    source: &str,
+    tree: &Tree,
+    file_entities: &[Entity],
+    all_entity_names: &HashMap<String, Vec<String>>,
+) -> Vec<Relation> {
     let mut relations = Vec::new();
     let root = tree.root_node();
     let bytes = source.as_bytes();
-
-    // Build a name->id lookup for the entity set
-    let name_to_ids: HashMap<String, Vec<String>> = {
-        let mut map: HashMap<String, Vec<String>> = HashMap::new();
-        for e in entities {
-            map.entry(e.name.clone()).or_default().push(e.id.clone());
-        }
-        map
-    };
+    let mut seen: HashSet<(String, String)> = HashSet::new();
 
     // Walk the tree looking for identifiers that reference known entities
     fn find_call_references(
@@ -497,18 +497,17 @@ pub fn extract_references(source: &str, tree: &Tree, entities: &[Entity]) -> Vec
         containing_entity_id: &str,
         name_to_ids: &HashMap<String, Vec<String>>,
         relations: &mut Vec<Relation>,
+        seen: &mut HashSet<(String, String)>,
     ) {
         if node.kind() == "call_expression" || node.kind() == "call" {
-            // Get the function name being called
             if let Some(func_node) = node.child_by_field_name("function") {
                 let func_name = std::str::from_utf8(&bytes[func_node.byte_range()])
-                    .unwrap_or("")
-                    .to_string();
-                // Handle dotted names: take the last segment
-                let simple_name = func_name.rsplit('.').next().unwrap_or(&func_name);
+                    .unwrap_or("");
+                let simple_name = func_name.rsplit('.').next().unwrap_or(func_name);
                 if let Some(target_ids) = name_to_ids.get(simple_name) {
                     for target_id in target_ids {
-                        if target_id != containing_entity_id {
+                        let key = (containing_entity_id.to_string(), target_id.clone());
+                        if target_id != containing_entity_id && seen.insert(key) {
                             relations.push(Relation {
                                 from_id: containing_entity_id.to_string(),
                                 to_id: target_id.clone(),
@@ -520,18 +519,12 @@ pub fn extract_references(source: &str, tree: &Tree, entities: &[Entity]) -> Vec
             }
         }
 
-        // Check for type references (identifiers that match known types)
         if node.kind() == "type_identifier" || node.kind() == "identifier" {
-            let name = std::str::from_utf8(&bytes[node.byte_range()])
-                .unwrap_or("")
-                .to_string();
-            if let Some(target_ids) = name_to_ids.get(&name) {
+            let name = std::str::from_utf8(&bytes[node.byte_range()]).unwrap_or("");
+            if let Some(target_ids) = name_to_ids.get(name) {
                 for target_id in target_ids {
-                    if target_id != containing_entity_id
-                        && !relations.iter().any(|r| {
-                            r.from_id == containing_entity_id && r.to_id == *target_id
-                        })
-                    {
+                    let key = (containing_entity_id.to_string(), target_id.clone());
+                    if target_id != containing_entity_id && seen.insert(key) {
                         relations.push(Relation {
                             from_id: containing_entity_id.to_string(),
                             to_id: target_id.clone(),
@@ -544,13 +537,12 @@ pub fn extract_references(source: &str, tree: &Tree, entities: &[Entity]) -> Vec
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            find_call_references(child, bytes, containing_entity_id, name_to_ids, relations);
+            find_call_references(child, bytes, containing_entity_id, name_to_ids, relations, seen);
         }
     }
 
-    // For each entity, scan its body for references to other entities
-    for entity in entities {
-        // Find the node span in the tree
+    // Only iterate over entities from THIS file
+    for entity in file_entities {
         fn find_node_at(
             node: tree_sitter::Node,
             start_line: usize,
@@ -575,8 +567,9 @@ pub fn extract_references(source: &str, tree: &Tree, entities: &[Entity]) -> Vec
                 entity_node,
                 bytes,
                 &entity.id,
-                &name_to_ids,
+                &all_entity_names,
                 &mut relations,
+                &mut seen,
             );
         }
     }
@@ -705,15 +698,36 @@ pub fn build_repo_info(repo_path: &Path, lang: &DetectedLanguage, graph: &Entity
 }
 
 pub fn parse_repo(repo_path: &Path) -> Option<(RepoInfo, EntityGraph)> {
+    eprintln!("[fode] parse_repo: {:?}", repo_path);
+
     let lang = detect_language(repo_path)?;
+    eprintln!("[fode] detected language: {}", lang.name());
+
     let ts_lang = lang.tree_sitter_language();
     let files = collect_source_files(repo_path, &lang);
+    eprintln!("[fode] found {} source files", files.len());
 
+    // Track which entities belong to which file (by index in files vec)
     let mut all_entities = Vec::new();
+    let mut file_entity_ranges: Vec<(usize, usize)> = Vec::new(); // (start, end) into all_entities
 
-    for file_path in &files {
-        let source = std::fs::read_to_string(file_path).ok()?;
-        let tree = parse_file(&source, ts_lang.clone())?;
+    for (i, file_path) in files.iter().enumerate() {
+        let source = match std::fs::read_to_string(file_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[fode] skip file (read error): {:?}: {}", file_path, e);
+                file_entity_ranges.push((all_entities.len(), all_entities.len()));
+                continue;
+            }
+        };
+        let tree = match parse_file(&source, ts_lang.clone()) {
+            Some(t) => t,
+            None => {
+                eprintln!("[fode] skip file (parse error): {:?}", file_path);
+                file_entity_ranges.push((all_entities.len(), all_entities.len()));
+                continue;
+            }
+        };
 
         let rel_path = file_path
             .strip_prefix(repo_path)
@@ -721,6 +735,7 @@ pub fn parse_repo(repo_path: &Path) -> Option<(RepoInfo, EntityGraph)> {
             .to_string_lossy()
             .to_string();
 
+        let start = all_entities.len();
         let entities = match lang {
             DetectedLanguage::Go => {
                 let pkg = get_go_package(&source, &tree);
@@ -728,18 +743,48 @@ pub fn parse_repo(repo_path: &Path) -> Option<(RepoInfo, EntityGraph)> {
             }
             _ => extract_entities_generic(&source, &tree, &rel_path, &lang),
         };
-
         all_entities.extend(entities);
+        file_entity_ranges.push((start, all_entities.len()));
+
+        if (i + 1) % 100 == 0 {
+            eprintln!("[fode] parsed {}/{} files, {} entities so far", i + 1, files.len(), all_entities.len());
+        }
     }
 
-    // Extract cross-references
+    eprintln!("[fode] extracted {} entities total, building references...", all_entities.len());
+
+    // Build global name lookup once
+    let name_to_ids: HashMap<String, Vec<String>> = {
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for e in &all_entities {
+            map.entry(e.name.clone()).or_default().push(e.id.clone());
+        }
+        map
+    };
+
+    // Extract cross-references, scoped per file
     let mut all_relations = Vec::new();
-    for file_path in &files {
-        let source = std::fs::read_to_string(file_path).ok()?;
-        let tree = parse_file(&source, ts_lang.clone())?;
-        let relations = extract_references(&source, &tree, &all_entities);
+    for (i, file_path) in files.iter().enumerate() {
+        let (start, end) = file_entity_ranges[i];
+        if start == end {
+            continue; // no entities in this file
+        }
+
+        let source = match std::fs::read_to_string(file_path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let tree = match parse_file(&source, ts_lang.clone()) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        let file_entities = &all_entities[start..end];
+        let relations = extract_references(&source, &tree, file_entities, &name_to_ids);
         all_relations.extend(relations);
     }
+
+    eprintln!("[fode] found {} relations", all_relations.len());
 
     let graph = EntityGraph {
         entities: all_entities,
@@ -747,10 +792,6 @@ pub fn parse_repo(repo_path: &Path) -> Option<(RepoInfo, EntityGraph)> {
     };
 
     let info = build_repo_info(repo_path, &lang, &graph);
+    eprintln!("[fode] done: {} entities, {} relations", info.total_entities, graph.relations.len());
     Some((info, graph))
-}
-
-// Helper to find the name field, used by build_repo_info
-fn _name_of(info: &RepoInfo) -> &str {
-    &info.name
 }
