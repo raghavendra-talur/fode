@@ -158,11 +158,21 @@ pub fn get_entity_focus(entity_id: String, state: State<AppState>) -> Result<Foc
         }
     }
 
-    // Also find entities in the same package as "siblings"
+    // Also find entities in the same directory (same Go package) as "siblings"
+    let center_dir = std::path::Path::new(&center.file)
+        .parent()
+        .and_then(|p| p.to_str())
+        .unwrap_or(".");
     let siblings: Vec<RelatedEntity> = graph
         .entities
         .iter()
-        .filter(|e| e.package == center.package && e.id != center.id)
+        .filter(|e| {
+            let e_dir = std::path::Path::new(&e.file)
+                .parent()
+                .and_then(|p| p.to_str())
+                .unwrap_or(".");
+            e_dir == center_dir && e.id != center.id
+        })
         .filter(|e| !related.iter().any(|r| r.entity.id == e.id))
         .take(10)
         .map(|e| RelatedEntity {

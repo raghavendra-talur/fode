@@ -478,26 +478,141 @@ pub fn extract_entities_generic(
 
 /// Metadata about an entity used during reference resolution.
 pub(crate) struct EntityMeta {
-    package: String,
+    /// Repo-relative directory path (unique package identifier).
+    /// e.g. "internal/controller", "cmd/hub", "."
+    pkg_dir: String,
+}
+
+/// Map of import qualifier (local name) -> repo-relative directory path.
+/// Built per source file from its import declarations + go.mod module path.
+type ImportMap = HashMap<String, String>;
+
+/// Parse Go import declarations from a source file.
+/// Returns a map of local_name -> full_import_path.
+fn parse_go_imports(source: &str, tree: &Tree) -> HashMap<String, String> {
+    let mut imports = HashMap::new();
+    let root = tree.root_node();
+    let bytes = source.as_bytes();
+
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        if child.kind() != "import_declaration" {
+            continue;
+        }
+        let mut inner = child.walk();
+        for spec in child.children(&mut inner) {
+            if spec.kind() == "import_spec" {
+                // import_spec can have: name? path
+                let path_node = spec.child_by_field_name("path");
+                let name_node = spec.child_by_field_name("name");
+
+                if let Some(path_n) = path_node {
+                    let import_path = std::str::from_utf8(&bytes[path_n.byte_range()])
+                        .unwrap_or("")
+                        .trim_matches('"')
+                        .to_string();
+
+                    let local_name = if let Some(name_n) = name_node {
+                        let n = std::str::from_utf8(&bytes[name_n.byte_range()])
+                            .unwrap_or("")
+                            .to_string();
+                        if n == "." || n == "_" {
+                            continue; // dot imports and blank imports — skip for now
+                        }
+                        n
+                    } else {
+                        // Default: last segment of import path
+                        import_path.rsplit('/').next().unwrap_or(&import_path).to_string()
+                    };
+
+                    imports.insert(local_name, import_path);
+                }
+            } else if spec.kind() == "import_spec_list" {
+                // Parenthesized import block
+                let mut list_cursor = spec.walk();
+                for item in spec.children(&mut list_cursor) {
+                    if item.kind() == "import_spec" {
+                        let path_node = item.child_by_field_name("path");
+                        let name_node = item.child_by_field_name("name");
+
+                        if let Some(path_n) = path_node {
+                            let import_path = std::str::from_utf8(&bytes[path_n.byte_range()])
+                                .unwrap_or("")
+                                .trim_matches('"')
+                                .to_string();
+
+                            let local_name = if let Some(name_n) = name_node {
+                                let n = std::str::from_utf8(&bytes[name_n.byte_range()])
+                                    .unwrap_or("")
+                                    .to_string();
+                                if n == "." || n == "_" {
+                                    continue;
+                                }
+                                n
+                            } else {
+                                import_path.rsplit('/').next().unwrap_or(&import_path).to_string()
+                            };
+
+                            imports.insert(local_name, import_path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    imports
+}
+
+/// Resolve a Go import qualifier to a repo-relative directory path.
+/// Strips the module prefix from the full import path.
+fn resolve_import_to_dir(
+    qualifier: &str,
+    file_imports: &ImportMap,
+    module_path: &str,
+) -> Option<String> {
+    let full_path = file_imports.get(qualifier)?;
+    if let Some(rel) = full_path.strip_prefix(module_path) {
+        let rel = rel.trim_start_matches('/');
+        if rel.is_empty() {
+            Some(".".to_string())
+        } else {
+            Some(rel.to_string())
+        }
+    } else {
+        // External dependency — not in this repo
+        None
+    }
+}
+
+/// Get the repo-relative directory for a file path.
+fn file_dir(file_path: &str) -> String {
+    Path::new(file_path)
+        .parent()
+        .and_then(|p| p.to_str())
+        .unwrap_or(".")
+        .to_string()
 }
 
 /// Extract references from entities in a single file.
-/// `file_entities` should only contain entities from this file.
-/// `all_entity_names` is a global name->id lookup across the whole repo.
-/// `entity_meta` maps entity id -> package for package-aware matching.
+///
+/// Resolution strategy (Go-specific, with fallback for other languages):
+/// - Qualified refs (pkg.Name): resolve qualifier through file imports + module
+///   path to get a repo-relative dir, then match entities in that dir.
+/// - Bare identifiers: match entities in the same directory (same package).
 pub fn extract_references(
     source: &str,
     tree: &Tree,
     file_entities: &[Entity],
     all_entity_names: &HashMap<String, Vec<String>>,
     entity_meta: &HashMap<String, EntityMeta>,
+    file_import_dirs: &ImportMap,
+    caller_pkg_dir: &str,
 ) -> Vec<Relation> {
     let mut relations = Vec::new();
     let root = tree.root_node();
     let bytes = source.as_bytes();
     let mut seen: HashSet<(String, String)> = HashSet::new();
 
-    /// Try to add a relation, returns true if it was new.
     fn try_add(
         from_id: &str,
         to_id: &str,
@@ -521,104 +636,125 @@ pub fn extract_references(
         }
     }
 
-    // Walk the tree looking for identifiers that reference known entities.
-    // Package-aware: qualified calls (pkg.Func) match by qualifier+name,
-    // bare identifiers only match same-package entities.
+    /// Match a name against entities, filtering by expected pkg_dir.
+    fn match_targets(
+        name: &str,
+        expected_dir: &str,
+        from_id: &str,
+        kind: &RelationKind,
+        name_to_ids: &HashMap<String, Vec<String>>,
+        entity_meta: &HashMap<String, EntityMeta>,
+        seen: &mut HashSet<(String, String)>,
+        relations: &mut Vec<Relation>,
+    ) {
+        if let Some(target_ids) = name_to_ids.get(name) {
+            for target_id in target_ids {
+                if let Some(meta) = entity_meta.get(target_id.as_str()) {
+                    if meta.pkg_dir == expected_dir {
+                        try_add(from_id, target_id, kind.clone(), seen, relations);
+                    }
+                }
+            }
+        }
+    }
+
     fn find_references(
         node: tree_sitter::Node,
         bytes: &[u8],
         from_id: &str,
-        from_pkg: &str,
+        caller_pkg_dir: &str,
+        file_import_dirs: &ImportMap,
         name_to_ids: &HashMap<String, Vec<String>>,
         entity_meta: &HashMap<String, EntityMeta>,
         relations: &mut Vec<Relation>,
         seen: &mut HashSet<(String, String)>,
     ) {
+        // Handle call expressions: pkg.Func() or Func()
         if node.kind() == "call_expression" || node.kind() == "call" {
             if let Some(func_node) = node.child_by_field_name("function") {
                 let func_text = std::str::from_utf8(&bytes[func_node.byte_range()])
                     .unwrap_or("");
-                let simple_name = func_text.rsplit('.').next().unwrap_or(func_text);
-                let qualifier = if func_text.contains('.') {
-                    // e.g. "controllers.Reconcile" -> qualifier = "controllers"
-                    func_text.rsplitn(2, '.').nth(1)
-                } else {
-                    None
-                };
 
-                if let Some(target_ids) = name_to_ids.get(simple_name) {
-                    for target_id in target_ids {
-                        if let Some(meta) = entity_meta.get(target_id.as_str()) {
-                            let pkg_matches = match qualifier {
-                                // Qualified: qualifier must match target package
-                                Some(q) => meta.package == q,
-                                // Bare call: must be in the same package
-                                None => meta.package == from_pkg,
-                            };
-                            if pkg_matches {
-                                try_add(from_id, target_id, RelationKind::Calls, seen, relations);
-                            }
+                if func_text.contains('.') {
+                    // Qualified call: qualifier.Name()
+                    let simple_name = func_text.rsplit('.').next().unwrap_or(func_text);
+                    if let Some(qualifier) = func_text.rsplitn(2, '.').nth(1) {
+                        // Resolve qualifier via imports to a dir path
+                        if let Some(target_dir) = file_import_dirs.get(qualifier) {
+                            match_targets(
+                                simple_name, target_dir, from_id, &RelationKind::Calls,
+                                name_to_ids, entity_meta, seen, relations,
+                            );
+                        }
+                        // Also try matching methods: qualifier might be a variable,
+                        // not a package. In that case the method receiver type is
+                        // in the same package.
+                        if !file_import_dirs.contains_key(qualifier) {
+                            match_targets(
+                                simple_name, caller_pkg_dir, from_id, &RelationKind::Calls,
+                                name_to_ids, entity_meta, seen, relations,
+                            );
                         }
                     }
+                } else {
+                    // Bare call: same package only
+                    match_targets(
+                        func_text, caller_pkg_dir, from_id, &RelationKind::Calls,
+                        name_to_ids, entity_meta, seen, relations,
+                    );
                 }
             }
-            // Don't recurse into the call's function child — we already
-            // handled it above. Only recurse into arguments.
+            // Recurse into arguments but skip the function child
+            let func_id = node.child_by_field_name("function").map(|n| n.id());
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                if child.kind() != "selector_expression"
-                    && Some(child.id()) != node.child_by_field_name("function").map(|n| n.id())
-                {
-                    find_references(child, bytes, from_id, from_pkg, name_to_ids, entity_meta, relations, seen);
+                if Some(child.id()) != func_id && child.kind() != "selector_expression" {
+                    find_references(child, bytes, from_id, caller_pkg_dir, file_import_dirs, name_to_ids, entity_meta, relations, seen);
                 }
             }
             return;
         }
 
-        if node.kind() == "type_identifier" || node.kind() == "identifier" {
-            let name = std::str::from_utf8(&bytes[node.byte_range()]).unwrap_or("");
-            if let Some(target_ids) = name_to_ids.get(name) {
-                for target_id in target_ids {
-                    if let Some(meta) = entity_meta.get(target_id.as_str()) {
-                        // Bare identifier: only match same-package entities
-                        if meta.package == from_pkg {
-                            try_add(from_id, target_id, RelationKind::References, seen, relations);
-                        }
-                    }
-                }
-            }
-        }
-
-        // For selector expressions like pkg.Type, match qualifier against package
+        // Handle selector expressions: pkg.Type (non-call context)
         if node.kind() == "selector_expression" || node.kind() == "qualified_type" {
-            // First child is the qualifier, field "field" or last child is the name
             let qualifier_text = node.child(0)
                 .and_then(|n| std::str::from_utf8(&bytes[n.byte_range()]).ok());
             let field_text = node.child_by_field_name("field")
                 .and_then(|n| std::str::from_utf8(&bytes[n.byte_range()]).ok());
 
             if let (Some(qual), Some(field)) = (qualifier_text, field_text) {
-                if let Some(target_ids) = name_to_ids.get(field) {
-                    for target_id in target_ids {
-                        if let Some(meta) = entity_meta.get(target_id.as_str()) {
-                            if meta.package == qual {
-                                try_add(from_id, target_id, RelationKind::References, seen, relations);
-                            }
-                        }
-                    }
+                if let Some(target_dir) = file_import_dirs.get(qual) {
+                    match_targets(
+                        field, target_dir, from_id, &RelationKind::References,
+                        name_to_ids, entity_meta, seen, relations,
+                    );
+                }
+                // Method/field on local variable — same package
+                if !file_import_dirs.contains_key(qual) {
+                    match_targets(
+                        field, caller_pkg_dir, from_id, &RelationKind::References,
+                        name_to_ids, entity_meta, seen, relations,
+                    );
                 }
             }
-            // Don't recurse into children — we handled the qualified ref
             return;
+        }
+
+        // Bare identifiers: same directory only
+        if node.kind() == "type_identifier" || node.kind() == "identifier" {
+            let name = std::str::from_utf8(&bytes[node.byte_range()]).unwrap_or("");
+            match_targets(
+                name, caller_pkg_dir, from_id, &RelationKind::References,
+                name_to_ids, entity_meta, seen, relations,
+            );
         }
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            find_references(child, bytes, from_id, from_pkg, name_to_ids, entity_meta, relations, seen);
+            find_references(child, bytes, from_id, caller_pkg_dir, file_import_dirs, name_to_ids, entity_meta, relations, seen);
         }
     }
 
-    // Only iterate over entities from THIS file
     for entity in file_entities {
         fn find_node_at(
             node: tree_sitter::Node,
@@ -644,7 +780,8 @@ pub fn extract_references(
                 entity_node,
                 bytes,
                 &entity.id,
-                &entity.package,
+                caller_pkg_dir,
+                file_import_dirs,
                 all_entity_names,
                 entity_meta,
                 &mut relations,
@@ -832,6 +969,13 @@ pub fn parse_repo(repo_path: &Path) -> Option<(RepoInfo, EntityGraph)> {
 
     eprintln!("[fode] extracted {} entities total, building references...", all_entities.len());
 
+    // For Go, read the module path for import resolution
+    let module_path = if matches!(lang, DetectedLanguage::Go) {
+        get_go_module_name(repo_path)
+    } else {
+        String::new()
+    };
+
     // Build global name lookup once
     let name_to_ids: HashMap<String, Vec<String>> = {
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
@@ -841,10 +985,10 @@ pub fn parse_repo(repo_path: &Path) -> Option<(RepoInfo, EntityGraph)> {
         map
     };
 
-    // Build entity metadata (id -> package) for package-aware matching
+    // Build entity metadata: id -> pkg_dir (repo-relative directory path)
     let entity_meta: HashMap<String, EntityMeta> = all_entities
         .iter()
-        .map(|e| (e.id.clone(), EntityMeta { package: e.package.clone() }))
+        .map(|e| (e.id.clone(), EntityMeta { pkg_dir: file_dir(&e.file) }))
         .collect();
 
     // Extract cross-references, scoped per file
@@ -864,8 +1008,36 @@ pub fn parse_repo(repo_path: &Path) -> Option<(RepoInfo, EntityGraph)> {
             None => continue,
         };
 
+        // Build per-file import map: qualifier -> repo-relative dir
+        let file_import_dirs: ImportMap = if matches!(lang, DetectedLanguage::Go) {
+            let raw_imports = parse_go_imports(&source, &tree);
+            raw_imports
+                .into_iter()
+                .filter_map(|(local_name, full_path)| {
+                    resolve_import_to_dir(&local_name, &{
+                        let mut m = HashMap::new();
+                        m.insert(local_name.clone(), full_path);
+                        m
+                    }, &module_path)
+                    .map(|dir| (local_name, dir))
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
+
+        let rel_path = file_path
+            .strip_prefix(repo_path)
+            .unwrap_or(file_path)
+            .to_string_lossy()
+            .to_string();
+        let caller_pkg_dir = file_dir(&rel_path);
+
         let file_entities = &all_entities[start..end];
-        let relations = extract_references(&source, &tree, file_entities, &name_to_ids, &entity_meta);
+        let relations = extract_references(
+            &source, &tree, file_entities, &name_to_ids, &entity_meta,
+            &file_import_dirs, &caller_pkg_dir,
+        );
         all_relations.extend(relations);
     }
 
