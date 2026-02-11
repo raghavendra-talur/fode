@@ -55,7 +55,7 @@ async function openRepo() {
   if (!selected) return;
 
   showView('main');
-  $browseContainer.innerHTML = '<div class="loading">Parsing repository</div>';
+  $entityGrid.innerHTML = '<div class="loading">Parsing repository</div>';
   $focusContainer.classList.add('hidden');
   $browseContainer.style.display = '';
 
