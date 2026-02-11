@@ -4,8 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.fode.app",
   "build": {
-    "frontendDist": "../ui",
-    "devUrl": "http://localhost:1420"
+    "frontendDist": "../ui"
   },
   "app": {
     "windows": [
