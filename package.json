@@ -1,0 +1,9 @@
+{
+  "name": "fode",
+  "version": "0.1.0",
+  "description": "Entity-based code editor - a new way to look at code",
+  "scripts": {
+    "tauri": "cargo tauri"
+  },
+  "license": "Apache-2.0"
+}
