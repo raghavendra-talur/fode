@@ -476,28 +476,61 @@ pub fn extract_entities_generic(
     entities
 }
 
+/// Metadata about an entity used during reference resolution.
+pub(crate) struct EntityMeta {
+    package: String,
+}
+
 /// Extract references from entities in a single file.
 /// `file_entities` should only contain entities from this file.
 /// `all_entity_names` is a global name->id lookup across the whole repo.
+/// `entity_meta` maps entity id -> package for package-aware matching.
 pub fn extract_references(
     source: &str,
     tree: &Tree,
     file_entities: &[Entity],
     all_entity_names: &HashMap<String, Vec<String>>,
+    entity_meta: &HashMap<String, EntityMeta>,
 ) -> Vec<Relation> {
     let mut relations = Vec::new();
     let root = tree.root_node();
     let bytes = source.as_bytes();
     let mut seen: HashSet<(String, String)> = HashSet::new();
 
-    // Walk the tree looking for identifiers that reference known entities
-    fn find_call_references(
+    /// Try to add a relation, returns true if it was new.
+    fn try_add(
+        from_id: &str,
+        to_id: &str,
+        kind: RelationKind,
+        seen: &mut HashSet<(String, String)>,
+        relations: &mut Vec<Relation>,
+    ) -> bool {
+        if from_id == to_id {
+            return false;
+        }
+        let key = (from_id.to_string(), to_id.to_string());
+        if seen.insert(key) {
+            relations.push(Relation {
+                from_id: from_id.to_string(),
+                to_id: to_id.to_string(),
+                kind,
+            });
+            true
+        } else {
+            false
+        }
+    }
+
+    // Walk the tree looking for identifiers that reference known entities.
+    // Package-aware: qualified calls (pkg.Func) match by qualifier+name,
+    // bare identifiers only match same-package entities.
+    fn find_references(
         node: tree_sitter::Node,
         bytes: &[u8],
-        containing_entity_id: &str,
-        containing_entity_name: &str,
+        from_id: &str,
+        from_pkg: &str,
         name_to_ids: &HashMap<String, Vec<String>>,
-        id_to_name: &HashMap<String, String>,
+        entity_meta: &HashMap<String, EntityMeta>,
         relations: &mut Vec<Relation>,
         seen: &mut HashSet<(String, String)>,
     ) {
@@ -505,78 +538,85 @@ pub fn extract_references(
             if let Some(func_node) = node.child_by_field_name("function") {
                 let func_text = std::str::from_utf8(&bytes[func_node.byte_range()])
                     .unwrap_or("");
-                // Only treat qualified calls (e.g. pkg.Foo) as cross-references
-                // when the simple name matches the containing entity's name.
-                // A bare `main` inside func main is its own name decl, not a call to
-                // another package's main.
                 let simple_name = func_text.rsplit('.').next().unwrap_or(func_text);
-                let is_qualified = func_text.contains('.');
+                let qualifier = if func_text.contains('.') {
+                    // e.g. "controllers.Reconcile" -> qualifier = "controllers"
+                    func_text.rsplitn(2, '.').nth(1)
+                } else {
+                    None
+                };
+
                 if let Some(target_ids) = name_to_ids.get(simple_name) {
                     for target_id in target_ids {
-                        // Skip self
-                        if target_id == containing_entity_id {
-                            continue;
-                        }
-                        // Skip bare (unqualified) references to entities with the
-                        // same name as the containing entity — these are the
-                        // containing entity's own name node, not a real cross-ref.
-                        if !is_qualified {
-                            if let Some(target_name) = id_to_name.get(target_id.as_str()) {
-                                if target_name == containing_entity_name {
-                                    continue;
-                                }
+                        if let Some(meta) = entity_meta.get(target_id.as_str()) {
+                            let pkg_matches = match qualifier {
+                                // Qualified: qualifier must match target package
+                                Some(q) => meta.package == q,
+                                // Bare call: must be in the same package
+                                None => meta.package == from_pkg,
+                            };
+                            if pkg_matches {
+                                try_add(from_id, target_id, RelationKind::Calls, seen, relations);
                             }
-                        }
-                        let key = (containing_entity_id.to_string(), target_id.clone());
-                        if seen.insert(key) {
-                            relations.push(Relation {
-                                from_id: containing_entity_id.to_string(),
-                                to_id: target_id.clone(),
-                                kind: RelationKind::Calls,
-                            });
                         }
                     }
                 }
             }
+            // Don't recurse into the call's function child — we already
+            // handled it above. Only recurse into arguments.
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() != "selector_expression"
+                    && Some(child.id()) != node.child_by_field_name("function").map(|n| n.id())
+                {
+                    find_references(child, bytes, from_id, from_pkg, name_to_ids, entity_meta, relations, seen);
+                }
+            }
+            return;
         }
 
         if node.kind() == "type_identifier" || node.kind() == "identifier" {
             let name = std::str::from_utf8(&bytes[node.byte_range()]).unwrap_or("");
             if let Some(target_ids) = name_to_ids.get(name) {
                 for target_id in target_ids {
-                    if target_id == containing_entity_id {
-                        continue;
-                    }
-                    // Skip bare identifier references to entities with the same
-                    // name as the containing entity (own-name false positives).
-                    if let Some(target_name) = id_to_name.get(target_id.as_str()) {
-                        if target_name == containing_entity_name {
-                            continue;
+                    if let Some(meta) = entity_meta.get(target_id.as_str()) {
+                        // Bare identifier: only match same-package entities
+                        if meta.package == from_pkg {
+                            try_add(from_id, target_id, RelationKind::References, seen, relations);
                         }
-                    }
-                    let key = (containing_entity_id.to_string(), target_id.clone());
-                    if seen.insert(key) {
-                        relations.push(Relation {
-                            from_id: containing_entity_id.to_string(),
-                            to_id: target_id.clone(),
-                            kind: RelationKind::References,
-                        });
                     }
                 }
             }
         }
 
+        // For selector expressions like pkg.Type, match qualifier against package
+        if node.kind() == "selector_expression" || node.kind() == "qualified_type" {
+            // First child is the qualifier, field "field" or last child is the name
+            let qualifier_text = node.child(0)
+                .and_then(|n| std::str::from_utf8(&bytes[n.byte_range()]).ok());
+            let field_text = node.child_by_field_name("field")
+                .and_then(|n| std::str::from_utf8(&bytes[n.byte_range()]).ok());
+
+            if let (Some(qual), Some(field)) = (qualifier_text, field_text) {
+                if let Some(target_ids) = name_to_ids.get(field) {
+                    for target_id in target_ids {
+                        if let Some(meta) = entity_meta.get(target_id.as_str()) {
+                            if meta.package == qual {
+                                try_add(from_id, target_id, RelationKind::References, seen, relations);
+                            }
+                        }
+                    }
+                }
+            }
+            // Don't recurse into children — we handled the qualified ref
+            return;
+        }
+
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            find_call_references(child, bytes, containing_entity_id, containing_entity_name, name_to_ids, id_to_name, relations, seen);
+            find_references(child, bytes, from_id, from_pkg, name_to_ids, entity_meta, relations, seen);
         }
     }
-
-    // Build id->name lookup for filtering same-name false positives
-    let id_to_name: HashMap<String, String> = all_entity_names
-        .iter()
-        .flat_map(|(name, ids)| ids.iter().map(move |id| (id.clone(), name.clone())))
-        .collect();
 
     // Only iterate over entities from THIS file
     for entity in file_entities {
@@ -600,13 +640,13 @@ pub fn extract_references(
         }
 
         if let Some(entity_node) = find_node_at(root, entity.line, entity.end_line) {
-            find_call_references(
+            find_references(
                 entity_node,
                 bytes,
                 &entity.id,
-                &entity.name,
+                &entity.package,
                 all_entity_names,
-                &id_to_name,
+                entity_meta,
                 &mut relations,
                 &mut seen,
             );
@@ -801,6 +841,12 @@ pub fn parse_repo(repo_path: &Path) -> Option<(RepoInfo, EntityGraph)> {
         map
     };
 
+    // Build entity metadata (id -> package) for package-aware matching
+    let entity_meta: HashMap<String, EntityMeta> = all_entities
+        .iter()
+        .map(|e| (e.id.clone(), EntityMeta { package: e.package.clone() }))
+        .collect();
+
     // Extract cross-references, scoped per file
     let mut all_relations = Vec::new();
     for (i, file_path) in files.iter().enumerate() {
@@ -819,7 +865,7 @@ pub fn parse_repo(repo_path: &Path) -> Option<(RepoInfo, EntityGraph)> {
         };
 
         let file_entities = &all_entities[start..end];
-        let relations = extract_references(&source, &tree, file_entities, &name_to_ids);
+        let relations = extract_references(&source, &tree, file_entities, &name_to_ids, &entity_meta);
         all_relations.extend(relations);
     }
 
