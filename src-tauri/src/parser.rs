@@ -495,19 +495,40 @@ pub fn extract_references(
         node: tree_sitter::Node,
         bytes: &[u8],
         containing_entity_id: &str,
+        containing_entity_name: &str,
         name_to_ids: &HashMap<String, Vec<String>>,
+        id_to_name: &HashMap<String, String>,
         relations: &mut Vec<Relation>,
         seen: &mut HashSet<(String, String)>,
     ) {
         if node.kind() == "call_expression" || node.kind() == "call" {
             if let Some(func_node) = node.child_by_field_name("function") {
-                let func_name = std::str::from_utf8(&bytes[func_node.byte_range()])
+                let func_text = std::str::from_utf8(&bytes[func_node.byte_range()])
                     .unwrap_or("");
-                let simple_name = func_name.rsplit('.').next().unwrap_or(func_name);
+                // Only treat qualified calls (e.g. pkg.Foo) as cross-references
+                // when the simple name matches the containing entity's name.
+                // A bare `main` inside func main is its own name decl, not a call to
+                // another package's main.
+                let simple_name = func_text.rsplit('.').next().unwrap_or(func_text);
+                let is_qualified = func_text.contains('.');
                 if let Some(target_ids) = name_to_ids.get(simple_name) {
                     for target_id in target_ids {
+                        // Skip self
+                        if target_id == containing_entity_id {
+                            continue;
+                        }
+                        // Skip bare (unqualified) references to entities with the
+                        // same name as the containing entity — these are the
+                        // containing entity's own name node, not a real cross-ref.
+                        if !is_qualified {
+                            if let Some(target_name) = id_to_name.get(target_id.as_str()) {
+                                if target_name == containing_entity_name {
+                                    continue;
+                                }
+                            }
+                        }
                         let key = (containing_entity_id.to_string(), target_id.clone());
-                        if target_id != containing_entity_id && seen.insert(key) {
+                        if seen.insert(key) {
                             relations.push(Relation {
                                 from_id: containing_entity_id.to_string(),
                                 to_id: target_id.clone(),
@@ -523,8 +544,18 @@ pub fn extract_references(
             let name = std::str::from_utf8(&bytes[node.byte_range()]).unwrap_or("");
             if let Some(target_ids) = name_to_ids.get(name) {
                 for target_id in target_ids {
+                    if target_id == containing_entity_id {
+                        continue;
+                    }
+                    // Skip bare identifier references to entities with the same
+                    // name as the containing entity (own-name false positives).
+                    if let Some(target_name) = id_to_name.get(target_id.as_str()) {
+                        if target_name == containing_entity_name {
+                            continue;
+                        }
+                    }
                     let key = (containing_entity_id.to_string(), target_id.clone());
-                    if target_id != containing_entity_id && seen.insert(key) {
+                    if seen.insert(key) {
                         relations.push(Relation {
                             from_id: containing_entity_id.to_string(),
                             to_id: target_id.clone(),
@@ -537,9 +568,15 @@ pub fn extract_references(
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            find_call_references(child, bytes, containing_entity_id, name_to_ids, relations, seen);
+            find_call_references(child, bytes, containing_entity_id, containing_entity_name, name_to_ids, id_to_name, relations, seen);
         }
     }
+
+    // Build id->name lookup for filtering same-name false positives
+    let id_to_name: HashMap<String, String> = all_entity_names
+        .iter()
+        .flat_map(|(name, ids)| ids.iter().map(move |id| (id.clone(), name.clone())))
+        .collect();
 
     // Only iterate over entities from THIS file
     for entity in file_entities {
@@ -567,7 +604,9 @@ pub fn extract_references(
                 entity_node,
                 bytes,
                 &entity.id,
-                &all_entity_names,
+                &entity.name,
+                all_entity_names,
+                &id_to_name,
                 &mut relations,
                 &mut seen,
             );

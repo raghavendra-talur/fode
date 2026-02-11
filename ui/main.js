@@ -208,14 +208,14 @@ function renderFocusView(focus) {
   // Incoming
   $relatedIncoming.innerHTML = '';
   if (incoming.length > 0) {
-    $relatedIncoming.innerHTML = `<div class="related-section-label">incoming</div>` +
+    $relatedIncoming.innerHTML = `<div class="related-section-label">referenced by</div>` +
       incoming.map(r => relatedCardHtml(r)).join('');
   }
 
   // Outgoing + siblings
   $relatedOutgoing.innerHTML = '';
   if (outgoing.length > 0) {
-    $relatedOutgoing.innerHTML = `<div class="related-section-label">outgoing</div>` +
+    $relatedOutgoing.innerHTML = `<div class="related-section-label">references</div>` +
       outgoing.map(r => relatedCardHtml(r)).join('');
   }
   if (siblings.length > 0) {
