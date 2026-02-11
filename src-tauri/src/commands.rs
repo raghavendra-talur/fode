@@ -176,35 +176,26 @@ pub fn get_entity_focus(entity_id: String, state: State<AppState>) -> Result<Foc
         }
     }
 
-    // --- Tier 1: Same package (same directory) ---
-    // Include: all entities in same dir (both directly referenced and siblings)
-    let same_pkg: Vec<SamePkgEntry> = graph
-        .entities
-        .iter()
-        .filter(|e| {
-            let e_dir = std::path::Path::new(&e.file)
-                .parent()
-                .and_then(|p| p.to_str())
-                .unwrap_or(".");
-            e_dir == center_dir && e.id != center.id
-        })
-        .map(|e| SamePkgEntry {
-            id: e.id.clone(),
-            kind: e.kind.label().to_string(),
-            signature: e.signature.clone(),
-        })
-        .collect();
+    // --- Partition outgoing references by directory ---
+    // Tier 1: same package (same dir), Tier 2: different dir (same module)
+    let mut same_pkg = Vec::new();
+    let mut cross_pkg_counts: HashMap<String, (usize, usize)> = HashMap::new();
 
-    // --- Tier 2: Same module, different package ---
-    // Group outgoing references that are in different directories
-    let mut cross_pkg_counts: HashMap<String, (usize, usize)> = HashMap::new(); // dir -> (fn_count, type_count)
     for target_id in &outgoing_ids {
         if let Some(target) = graph.entities.iter().find(|e| e.id == *target_id) {
             let target_dir = std::path::Path::new(&target.file)
                 .parent()
                 .and_then(|p| p.to_str())
                 .unwrap_or(".");
-            if target_dir != center_dir {
+            if target_dir == center_dir {
+                // Tier 1: same package — compact signature
+                same_pkg.push(SamePkgEntry {
+                    id: target.id.clone(),
+                    kind: target.kind.label().to_string(),
+                    signature: target.signature.clone(),
+                });
+            } else {
+                // Tier 2: different package in same module — count by kind
                 let entry = cross_pkg_counts.entry(target_dir.to_string()).or_insert((0, 0));
                 match target.kind {
                     parser::EntityKind::Function | parser::EntityKind::Method => entry.0 += 1,
@@ -213,6 +204,7 @@ pub fn get_entity_focus(entity_id: String, state: State<AppState>) -> Result<Foc
             }
         }
     }
+
     let mut same_module: Vec<ModulePkgGroup> = cross_pkg_counts
         .into_iter()
         .map(|(dir, (fn_count, type_count))| {
