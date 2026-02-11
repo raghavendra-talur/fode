@@ -186,12 +186,7 @@ async function focusEntity(entityId) {
 window.focusEntity = focusEntity;
 
 function renderFocusView(focus) {
-  const { center, related } = focus;
-
-  // Separate related by direction
-  const incoming = related.filter(r => r.direction === 'incoming');
-  const outgoing = related.filter(r => r.direction === 'outgoing');
-  const siblings = related.filter(r => r.direction === 'sibling');
+  const { center, incoming, same_pkg, same_module, external_deps } = focus;
 
   // Center entity
   $centerEntity.innerHTML = `
@@ -205,36 +200,59 @@ function renderFocusView(focus) {
     <div class="center-entity-source"><pre>${escapeHtml(center.source)}</pre></div>
   `;
 
-  // Incoming
+  // Left column: incoming references
   $relatedIncoming.innerHTML = '';
   if (incoming.length > 0) {
     $relatedIncoming.innerHTML = `<div class="related-section-label">referenced by</div>` +
-      incoming.map(r => relatedCardHtml(r)).join('');
+      incoming.map(r => `
+        <div class="related-card" onclick="focusEntity('${escapeHtml(r.entity.id)}')">
+          <div class="related-card-header">
+            ${kindBadge(r.entity.kind)}
+            <span class="related-card-name">${escapeHtml(r.entity.name)}</span>
+          </div>
+          <div class="related-card-relation">${escapeHtml(r.relation)}</div>
+          <div class="related-card-sig">${escapeHtml(r.entity.signature)}</div>
+        </div>
+      `).join('');
   }
 
-  // Outgoing + siblings
+  // Right column: three-tier references
   $relatedOutgoing.innerHTML = '';
-  if (outgoing.length > 0) {
-    $relatedOutgoing.innerHTML = `<div class="related-section-label">references</div>` +
-      outgoing.map(r => relatedCardHtml(r)).join('');
-  }
-  if (siblings.length > 0) {
-    $relatedOutgoing.innerHTML += `<div class="related-section-label" style="margin-top:0.5rem">same package</div>` +
-      siblings.map(r => relatedCardHtml(r)).join('');
-  }
-}
 
-function relatedCardHtml(r) {
-  return `
-    <div class="related-card" onclick="focusEntity('${escapeHtml(r.entity.id)}')">
-      <div class="related-card-header">
-        ${kindBadge(r.entity.kind)}
-        <span class="related-card-name">${escapeHtml(r.entity.name)}</span>
-      </div>
-      <div class="related-card-relation">${escapeHtml(r.relation)}</div>
-      <div class="related-card-sig">${escapeHtml(r.entity.signature)}</div>
-    </div>
-  `;
+  // Tier 1: Same package — compact signature-only entries
+  if (same_pkg.length > 0) {
+    $relatedOutgoing.innerHTML += `<div class="related-section-label">same package</div>` +
+      same_pkg.map(e => `
+        <div class="compact-sig" onclick="focusEntity('${escapeHtml(e.id)}')">
+          ${escapeHtml(e.signature)}
+        </div>
+      `).join('');
+  }
+
+  // Tier 2: Same module, different package — grouped summaries
+  if (same_module.length > 0) {
+    $relatedOutgoing.innerHTML += `<div class="related-section-label">module packages</div>` +
+      same_module.map(g => {
+        const parts = [];
+        if (g.fn_count > 0) parts.push(`${g.fn_count} function${g.fn_count > 1 ? 's' : ''}`);
+        if (g.type_count > 0) parts.push(`${g.type_count} type${g.type_count > 1 ? 's' : ''}`);
+        return `
+          <div class="pkg-summary">
+            <span class="pkg-summary-count">${parts.join(', ')}</span>
+            <span class="pkg-summary-label"> in <strong>${escapeHtml(g.pkg_name)}</strong></span>
+            <span class="pkg-summary-dir">${escapeHtml(g.pkg_dir)}</span>
+          </div>
+        `;
+      }).join('');
+  }
+
+  // Tier 3: External dependencies — just the import path
+  if (external_deps.length > 0) {
+    $relatedOutgoing.innerHTML += `<div class="related-section-label">external deps</div>` +
+      external_deps.map(dep => `
+        <div class="ext-dep">${escapeHtml(dep)}</div>
+      `).join('');
+  }
 }
 
 function showBrowse() {

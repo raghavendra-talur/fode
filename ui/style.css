@@ -404,6 +404,68 @@ body {
   margin-top: 0.2rem;
 }
 
+/* === Tier 1: Compact signature entries (same package) === */
+.compact-sig {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  padding: 0.35rem 0.6rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.15s;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.compact-sig:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--text-dim);
+  color: var(--text);
+}
+
+/* === Tier 2: Module package summaries === */
+.pkg-summary {
+  padding: 0.4rem 0.6rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+
+.pkg-summary-count {
+  color: var(--accent);
+}
+
+.pkg-summary-label {
+  color: var(--text-muted);
+}
+
+.pkg-summary-label strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.pkg-summary-dir {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+
+/* === Tier 3: External dependency items === */
+.ext-dep {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  padding: 0.3rem 0.6rem;
+  border-left: 2px solid var(--border);
+  margin-left: 0.25rem;
+}
+
 /* === Browse Grid === */
 #browse-container {
   padding: 0 1.5rem 1.5rem;

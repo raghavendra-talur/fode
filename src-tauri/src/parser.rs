@@ -99,6 +99,8 @@ pub struct RepoAttribute {
 pub struct EntityGraph {
     pub entities: Vec<Entity>,
     pub relations: Vec<Relation>,
+    /// entity_id -> list of external import paths used within its body
+    pub external_deps: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -563,27 +565,6 @@ fn parse_go_imports(source: &str, tree: &Tree) -> HashMap<String, String> {
     imports
 }
 
-/// Resolve a Go import qualifier to a repo-relative directory path.
-/// Strips the module prefix from the full import path.
-fn resolve_import_to_dir(
-    qualifier: &str,
-    file_imports: &ImportMap,
-    module_path: &str,
-) -> Option<String> {
-    let full_path = file_imports.get(qualifier)?;
-    if let Some(rel) = full_path.strip_prefix(module_path) {
-        let rel = rel.trim_start_matches('/');
-        if rel.is_empty() {
-            Some(".".to_string())
-        } else {
-            Some(rel.to_string())
-        }
-    } else {
-        // External dependency — not in this repo
-        None
-    }
-}
-
 /// Get the repo-relative directory for a file path.
 fn file_dir(file_path: &str) -> String {
     Path::new(file_path)
@@ -793,6 +774,37 @@ pub fn extract_references(
     relations
 }
 
+/// For each entity in a file, find external import paths referenced in its source.
+/// `file_imports` maps qualifier -> full_import_path (raw, before module stripping).
+/// `module_path` is the Go module path; imports NOT under it are external.
+fn collect_external_deps(
+    file_entities: &[Entity],
+    file_imports: &HashMap<String, String>,
+    module_path: &str,
+) -> HashMap<String, Vec<String>> {
+    let mut result = HashMap::new();
+    for entity in file_entities {
+        let mut deps: Vec<String> = Vec::new();
+        for (qualifier, full_path) in file_imports {
+            // Only external: not under this module
+            if full_path.starts_with(module_path) {
+                continue;
+            }
+            // Check if this qualifier appears in the entity source as "qualifier."
+            let pattern = format!("{}.", qualifier);
+            if entity.source.contains(&pattern) {
+                deps.push(full_path.clone());
+            }
+        }
+        deps.sort();
+        deps.dedup();
+        if !deps.is_empty() {
+            result.insert(entity.id.clone(), deps);
+        }
+    }
+    result
+}
+
 pub fn get_go_package(source: &str, tree: &Tree) -> String {
     let root = tree.root_node();
     let bytes = source.as_bytes();
@@ -993,6 +1005,7 @@ pub fn parse_repo(repo_path: &Path) -> Option<(RepoInfo, EntityGraph)> {
 
     // Extract cross-references, scoped per file
     let mut all_relations = Vec::new();
+    let mut all_external_deps: HashMap<String, Vec<String>> = HashMap::new();
     for (i, file_path) in files.iter().enumerate() {
         let (start, end) = file_entity_ranges[i];
         if start == end {
@@ -1008,23 +1021,26 @@ pub fn parse_repo(repo_path: &Path) -> Option<(RepoInfo, EntityGraph)> {
             None => continue,
         };
 
-        // Build per-file import map: qualifier -> repo-relative dir
-        let file_import_dirs: ImportMap = if matches!(lang, DetectedLanguage::Go) {
-            let raw_imports = parse_go_imports(&source, &tree);
-            raw_imports
-                .into_iter()
-                .filter_map(|(local_name, full_path)| {
-                    resolve_import_to_dir(&local_name, &{
-                        let mut m = HashMap::new();
-                        m.insert(local_name.clone(), full_path);
-                        m
-                    }, &module_path)
-                    .map(|dir| (local_name, dir))
-                })
-                .collect()
+        // Parse raw imports (qualifier -> full import path)
+        let raw_imports: HashMap<String, String> = if matches!(lang, DetectedLanguage::Go) {
+            parse_go_imports(&source, &tree)
         } else {
             HashMap::new()
         };
+
+        // Build per-file import map: qualifier -> repo-relative dir (internal only)
+        let file_import_dirs: ImportMap = raw_imports
+            .iter()
+            .filter_map(|(local_name, full_path)| {
+                if let Some(rel) = full_path.strip_prefix(&module_path) {
+                    let rel = rel.trim_start_matches('/');
+                    let dir = if rel.is_empty() { ".".to_string() } else { rel.to_string() };
+                    Some((local_name.clone(), dir))
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         let rel_path = file_path
             .strip_prefix(repo_path)
@@ -1039,6 +1055,12 @@ pub fn parse_repo(repo_path: &Path) -> Option<(RepoInfo, EntityGraph)> {
             &file_import_dirs, &caller_pkg_dir,
         );
         all_relations.extend(relations);
+
+        // Collect external deps for entities in this file
+        if matches!(lang, DetectedLanguage::Go) {
+            let ext = collect_external_deps(file_entities, &raw_imports, &module_path);
+            all_external_deps.extend(ext);
+        }
     }
 
     eprintln!("[fode] found {} relations", all_relations.len());
@@ -1046,6 +1068,7 @@ pub fn parse_repo(repo_path: &Path) -> Option<(RepoInfo, EntityGraph)> {
     let graph = EntityGraph {
         entities: all_entities,
         relations: all_relations,
+        external_deps: all_external_deps,
     };
 
     let info = build_repo_info(repo_path, &lang, &graph);

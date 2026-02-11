@@ -1,5 +1,6 @@
 use crate::parser::{self, Entity, EntityGraph, RelationKind, RepoInfo};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::State;
@@ -19,14 +20,41 @@ pub struct SearchResult {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FocusView {
     pub center: Entity,
-    pub related: Vec<RelatedEntity>,
+    /// Entities that call/reference this entity (incoming edges)
+    pub incoming: Vec<IncomingRef>,
+    /// Same-package entities (compact: just signature)
+    pub same_pkg: Vec<SamePkgEntry>,
+    /// Same-module, different-package references (grouped summaries)
+    pub same_module: Vec<ModulePkgGroup>,
+    /// External module/package dependencies
+    pub external_deps: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct RelatedEntity {
+pub struct IncomingRef {
     pub entity: Entity,
     pub relation: String,
-    pub direction: String, // "incoming" or "outgoing"
+}
+
+/// Compact same-package reference — just the signature and kind, clickable.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SamePkgEntry {
+    pub id: String,
+    pub kind: String,
+    pub signature: String,
+}
+
+/// Summary for a cross-package reference within the same module.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ModulePkgGroup {
+    /// Display name for the package (last segment of dir path)
+    pub pkg_name: String,
+    /// Repo-relative dir path
+    pub pkg_dir: String,
+    /// How many functions/methods referenced
+    pub fn_count: usize,
+    /// How many types referenced
+    pub type_count: usize,
 }
 
 #[tauri::command]
@@ -116,27 +144,18 @@ pub fn get_entity_focus(entity_id: String, state: State<AppState>) -> Result<Foc
         .ok_or_else(|| format!("Entity not found: {}", entity_id))?
         .clone();
 
-    let mut related = Vec::new();
+    let center_dir = std::path::Path::new(&center.file)
+        .parent()
+        .and_then(|p| p.to_str())
+        .unwrap_or(".");
 
-    // Find all relations involving this entity
+    let mut incoming = Vec::new();
+    let mut outgoing_ids = Vec::new();
+
+    // Collect incoming (who references this entity) and outgoing targets
     for relation in &graph.relations {
         if relation.from_id == entity_id {
-            if let Some(target) = graph.entities.iter().find(|e| e.id == relation.to_id) {
-                let relation_label = match &relation.kind {
-                    RelationKind::Calls => "calls",
-                    RelationKind::References => "references",
-                    RelationKind::Contains => "contains",
-                    RelationKind::Implements => "implements",
-                    RelationKind::Returns => "returns",
-                    RelationKind::Accepts => "accepts",
-                    _ => "related to",
-                };
-                related.push(RelatedEntity {
-                    entity: target.clone(),
-                    relation: relation_label.to_string(),
-                    direction: "outgoing".to_string(),
-                });
-            }
+            outgoing_ids.push(relation.to_id.clone());
         }
         if relation.to_id == entity_id {
             if let Some(source) = graph.entities.iter().find(|e| e.id == relation.from_id) {
@@ -149,21 +168,17 @@ pub fn get_entity_focus(entity_id: String, state: State<AppState>) -> Result<Foc
                     RelationKind::Accepts => "accepted by",
                     _ => "related to",
                 };
-                related.push(RelatedEntity {
+                incoming.push(IncomingRef {
                     entity: source.clone(),
                     relation: relation_label.to_string(),
-                    direction: "incoming".to_string(),
                 });
             }
         }
     }
 
-    // Also find entities in the same directory (same Go package) as "siblings"
-    let center_dir = std::path::Path::new(&center.file)
-        .parent()
-        .and_then(|p| p.to_str())
-        .unwrap_or(".");
-    let siblings: Vec<RelatedEntity> = graph
+    // --- Tier 1: Same package (same directory) ---
+    // Include: all entities in same dir (both directly referenced and siblings)
+    let same_pkg: Vec<SamePkgEntry> = graph
         .entities
         .iter()
         .filter(|e| {
@@ -173,18 +188,61 @@ pub fn get_entity_focus(entity_id: String, state: State<AppState>) -> Result<Foc
                 .unwrap_or(".");
             e_dir == center_dir && e.id != center.id
         })
-        .filter(|e| !related.iter().any(|r| r.entity.id == e.id))
-        .take(10)
-        .map(|e| RelatedEntity {
-            entity: e.clone(),
-            relation: "same package".to_string(),
-            direction: "sibling".to_string(),
+        .map(|e| SamePkgEntry {
+            id: e.id.clone(),
+            kind: e.kind.label().to_string(),
+            signature: e.signature.clone(),
         })
         .collect();
 
-    related.extend(siblings);
+    // --- Tier 2: Same module, different package ---
+    // Group outgoing references that are in different directories
+    let mut cross_pkg_counts: HashMap<String, (usize, usize)> = HashMap::new(); // dir -> (fn_count, type_count)
+    for target_id in &outgoing_ids {
+        if let Some(target) = graph.entities.iter().find(|e| e.id == *target_id) {
+            let target_dir = std::path::Path::new(&target.file)
+                .parent()
+                .and_then(|p| p.to_str())
+                .unwrap_or(".");
+            if target_dir != center_dir {
+                let entry = cross_pkg_counts.entry(target_dir.to_string()).or_insert((0, 0));
+                match target.kind {
+                    parser::EntityKind::Function | parser::EntityKind::Method => entry.0 += 1,
+                    _ => entry.1 += 1,
+                }
+            }
+        }
+    }
+    let mut same_module: Vec<ModulePkgGroup> = cross_pkg_counts
+        .into_iter()
+        .map(|(dir, (fn_count, type_count))| {
+            let pkg_name = dir.rsplit('/').next().unwrap_or(&dir).to_string();
+            ModulePkgGroup {
+                pkg_name,
+                pkg_dir: dir,
+                fn_count,
+                type_count,
+            }
+        })
+        .collect();
+    same_module.sort_by(|a, b| {
+        (b.fn_count + b.type_count).cmp(&(a.fn_count + a.type_count))
+    });
 
-    Ok(FocusView { center, related })
+    // --- Tier 3: External dependencies ---
+    let external_deps = graph
+        .external_deps
+        .get(&entity_id)
+        .cloned()
+        .unwrap_or_default();
+
+    Ok(FocusView {
+        center,
+        incoming,
+        same_pkg,
+        same_module,
+        external_deps,
+    })
 }
 
 #[tauri::command]
