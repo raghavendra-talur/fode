@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>fode</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Landing: no repo loaded -->
+    <div id="landing" class="view active">
+      <div class="landing-content">
+        <h1 class="logo">fode</h1>
+        <p class="tagline">entity-based code viewer</p>
+        <button id="open-repo-btn" class="btn-primary">Open Repository</button>
+        <div id="drop-hint" class="drop-hint">or pass a path as argument</div>
+      </div>
+    </div>
+
+    <!-- Main: repo loaded -->
+    <div id="main" class="view">
+      <!-- Top bar: repo info -->
+      <header id="repo-header">
+        <div class="repo-name" id="repo-name"></div>
+        <div class="repo-attributes" id="repo-attributes"></div>
+        <div class="repo-stats" id="repo-stats"></div>
+      </header>
+
+      <!-- Search -->
+      <div id="search-container">
+        <input
+          type="text"
+          id="search-input"
+          placeholder="Search entities... (functions, types, variables)"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <div id="search-results" class="search-results hidden"></div>
+      </div>
+
+      <!-- Entity focus view -->
+      <div id="focus-container" class="hidden">
+        <!-- Related entities: incoming -->
+        <div id="related-incoming" class="related-column incoming"></div>
+
+        <!-- Center entity -->
+        <div id="center-entity" class="center-entity"></div>
+
+        <!-- Related entities: outgoing -->
+        <div id="related-outgoing" class="related-column outgoing"></div>
+      </div>
+
+      <!-- Browse all entities (shown when no entity is focused) -->
+      <div id="browse-container">
+        <div id="entity-grid" class="entity-grid"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>
