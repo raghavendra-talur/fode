@@ -237,6 +237,82 @@ pub fn get_entity_focus(entity_id: String, state: State<AppState>) -> Result<Foc
     })
 }
 
+// === Graph visualization data (lightweight, no source code) ===
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GraphNode {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub package: String,
+    pub file: String,
+    pub line: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GraphEdge {
+    pub source: String,
+    pub target: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GraphData {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+    pub packages: Vec<String>,
+}
+
+#[tauri::command]
+pub fn get_graph_data(state: State<AppState>) -> Result<GraphData, String> {
+    let graph = state.entity_graph.lock().unwrap();
+    let graph = graph.as_ref().ok_or("No repo loaded")?;
+
+    let nodes: Vec<GraphNode> = graph
+        .entities
+        .iter()
+        .map(|e| GraphNode {
+            id: e.id.clone(),
+            name: e.name.clone(),
+            kind: e.kind.label().to_string(),
+            package: e.package.clone(),
+            file: e.file.clone(),
+            line: e.line,
+        })
+        .collect();
+
+    // Build a set of valid entity IDs for filtering edges
+    let valid_ids: std::collections::HashSet<&str> =
+        graph.entities.iter().map(|e| e.id.as_str()).collect();
+
+    let edges: Vec<GraphEdge> = graph
+        .relations
+        .iter()
+        .filter(|r| valid_ids.contains(r.from_id.as_str()) && valid_ids.contains(r.to_id.as_str()))
+        .map(|r| GraphEdge {
+            source: r.from_id.clone(),
+            target: r.to_id.clone(),
+            kind: format!("{:?}", r.kind),
+        })
+        .collect();
+
+    // Collect unique packages
+    let mut pkg_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for e in &graph.entities {
+        if !e.package.is_empty() {
+            pkg_set.insert(e.package.clone());
+        }
+    }
+    let mut packages: Vec<String> = pkg_set.into_iter().collect();
+    packages.sort();
+
+    Ok(GraphData {
+        nodes,
+        edges,
+        packages,
+    })
+}
+
 #[tauri::command]
 pub fn get_all_entities(state: State<AppState>) -> Result<Vec<Entity>, String> {
     let graph = state.entity_graph.lock().unwrap();

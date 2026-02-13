@@ -51,9 +51,36 @@
         <div id="related-outgoing" class="related-column outgoing"></div>
       </div>
 
+      <!-- View toggle + filters (between search and content) -->
+      <div id="view-controls" class="hidden">
+        <div class="view-toggle">
+          <button id="btn-grid-view" class="view-toggle-btn active" onclick="switchToGrid()">Grid</button>
+          <button id="btn-graph-view" class="view-toggle-btn" onclick="switchToGraph()">Graph</button>
+        </div>
+        <div id="graph-filters" class="graph-filters hidden">
+          <div class="filter-group">
+            <span class="filter-label">Kind</span>
+            <div id="kind-filters" class="filter-chips"></div>
+          </div>
+          <div class="filter-group">
+            <span class="filter-label">Package</span>
+            <select id="package-filter" class="filter-select">
+              <option value="">All packages</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
       <!-- Browse all entities (shown when no entity is focused) -->
       <div id="browse-container">
         <div id="entity-grid" class="entity-grid"></div>
+      </div>
+
+      <!-- Graph visualization -->
+      <div id="graph-container" class="hidden">
+        <canvas id="graph-canvas"></canvas>
+        <div id="graph-tooltip" class="graph-tooltip hidden"></div>
+        <div id="graph-legend" class="graph-legend"></div>
       </div>
     </div>
   </div>
