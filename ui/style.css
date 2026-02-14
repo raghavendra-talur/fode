@@ -693,6 +693,51 @@ body {
   color: var(--text-dim);
 }
 
+/* === Graph Zoom Toolbar === */
+.graph-zoom-toolbar {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  z-index: 10;
+}
+
+.zoom-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: var(--bg-surface);
+  border: none;
+  color: var(--text-muted);
+  font-size: 1.1rem;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+  line-height: 1;
+}
+
+.zoom-btn:hover {
+  background: var(--bg-card-hover);
+  color: var(--text);
+}
+
+.zoom-btn:active {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.zoom-btn-fit {
+  font-size: 1rem;
+}
+
 .graph-legend {
   position: absolute;
   bottom: 12px;

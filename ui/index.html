@@ -78,6 +78,11 @@
       <div id="graph-container" class="hidden">
         <canvas id="graph-canvas"></canvas>
         <div id="graph-tooltip" class="graph-tooltip hidden"></div>
+        <div id="graph-zoom-toolbar" class="graph-zoom-toolbar">
+          <button class="zoom-btn" onclick="graphZoomIn()" title="Zoom in">+</button>
+          <button class="zoom-btn" onclick="graphZoomOut()" title="Zoom out">&minus;</button>
+          <button class="zoom-btn zoom-btn-fit" onclick="graphFitToScreen()" title="Fit to screen">&#x2922;</button>
+        </div>
         <div id="graph-legend" class="graph-legend"></div>
       </div>
     </div>

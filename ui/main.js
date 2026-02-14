@@ -467,6 +467,10 @@ function initGraph(data) {
 
   setupCanvasInteraction(canvas);
   startRenderLoop();
+
+  // Auto-fit once the simulation has settled a bit
+  setTimeout(() => graphFitToScreen(), 800);
+  setTimeout(() => graphFitToScreen(), 2000);
 }
 
 // === Render loop (always running while graph is visible) ===
@@ -990,6 +994,65 @@ function reheat(target) {
   graphState.alpha = Math.max(graphState.alpha, target);
   graphState.alphaTarget = 0;
 }
+
+// === ZOOM TOOLBAR ===
+function graphZoomIn() {
+  if (!graphState) return;
+  const tt = graphState.targetTransform;
+  const cx = graphState.width / 2;
+  const cy = graphState.height / 2;
+  const factor = 1.3;
+  const newK = Math.min(12, tt.k * factor);
+  tt.x = cx - (cx - tt.x) * (newK / tt.k);
+  tt.y = cy - (cy - tt.y) * (newK / tt.k);
+  tt.k = newK;
+}
+window.graphZoomIn = graphZoomIn;
+
+function graphZoomOut() {
+  if (!graphState) return;
+  const tt = graphState.targetTransform;
+  const cx = graphState.width / 2;
+  const cy = graphState.height / 2;
+  const factor = 0.77;
+  const newK = Math.max(0.05, tt.k * factor);
+  tt.x = cx - (cx - tt.x) * (newK / tt.k);
+  tt.y = cy - (cy - tt.y) * (newK / tt.k);
+  tt.k = newK;
+}
+window.graphZoomOut = graphZoomOut;
+
+function graphFitToScreen() {
+  if (!graphState) return;
+  const { nodes, width, height } = graphState;
+
+  // Compute bounding box of visible nodes
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  let count = 0;
+  for (const n of nodes) {
+    if (!n.visible) continue;
+    minX = Math.min(minX, n.x - n.radius);
+    minY = Math.min(minY, n.y - n.radius);
+    maxX = Math.max(maxX, n.x + n.radius);
+    maxY = Math.max(maxY, n.y + n.radius);
+    count++;
+  }
+  if (count === 0) return;
+
+  const graphW = maxX - minX || 1;
+  const graphH = maxY - minY || 1;
+  const padding = 60;
+  const scaleX = (width - padding * 2) / graphW;
+  const scaleY = (height - padding * 2) / graphH;
+  const k = Math.min(scaleX, scaleY, 3); // cap at 3x
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+
+  graphState.targetTransform.k = k;
+  graphState.targetTransform.x = width / 2 - cx * k;
+  graphState.targetTransform.y = height / 2 - cy * k;
+}
+window.graphFitToScreen = graphFitToScreen;
 
 // === FILTERS ===
 function setupFilters(packages, nodes) {
