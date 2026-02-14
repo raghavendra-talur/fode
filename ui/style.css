@@ -628,20 +628,11 @@ body {
   display: inline-block;
 }
 
-.filter-select {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text);
-  padding: 0.3rem 0.6rem;
-  font-size: 0.78rem;
-  font-family: var(--font-mono);
-  outline: none;
-  cursor: pointer;
-}
-
-.filter-select:focus {
-  border-color: var(--border-focus);
+.filter-chip.pkg-chip {
+  text-transform: none;
+  font-weight: 500;
+  font-size: 0.72rem;
+  letter-spacing: 0;
 }
 
 /* === Graph Container === */

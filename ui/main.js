@@ -28,7 +28,7 @@ const $graphTooltip = document.getElementById('graph-tooltip');
 const $graphLegend = document.getElementById('graph-legend');
 const $graphFilters = document.getElementById('graph-filters');
 const $kindFilters = document.getElementById('kind-filters');
-const $packageFilter = document.getElementById('package-filter');
+const $packageFilters = document.getElementById('package-filters');
 
 // === State ===
 let repoInfo = null;
@@ -297,7 +297,6 @@ function switchToGrid() {
   $browseContainer.style.display = '';
   $graphContainer.classList.add('hidden');
   $graphFilters.classList.add('hidden');
-  if (graphState) graphState.running = false;
 }
 window.switchToGrid = switchToGrid;
 
@@ -313,20 +312,15 @@ function switchToGraph() {
 }
 window.switchToGraph = switchToGraph;
 
-// === Kind color map (matches CSS badge colors) ===
+// ============================================================
+// === GRAPH ENGINE — Obsidian-quality force-directed graph ===
+// ============================================================
+
 const KIND_COLORS = {
-  function:  '#58a6ff',
-  method:    '#bc8cff',
-  struct:    '#3fb950',
-  interface: '#d29922',
-  type:      '#d29922',
-  const:     '#f85149',
-  var:       '#f778ba',
-  import:    '#76e3ea',
-  package:   '#76e3ea',
-  class:     '#3fb950',
-  enum:      '#d29922',
-  trait:     '#d29922',
+  function:  '#58a6ff', method:    '#bc8cff', struct:    '#3fb950',
+  interface: '#d29922', type:      '#d29922', const:     '#f85149',
+  var:       '#f778ba', import:    '#76e3ea', package:   '#76e3ea',
+  class:     '#3fb950', enum:      '#d29922', trait:     '#d29922',
   module:    '#76e3ea',
 };
 
@@ -336,15 +330,30 @@ const KIND_LABELS = {
   package: 'pk', class: 'cl', enum: 'en', trait: 'tr', module: 'mo',
 };
 
-// === Force-Directed Graph ===
+// Precompute RGB channels for each kind color
+const KIND_RGB = {};
+for (const [k, hex] of Object.entries(KIND_COLORS)) {
+  KIND_RGB[k] = {
+    r: parseInt(hex.slice(1, 3), 16),
+    g: parseInt(hex.slice(3, 5), 16),
+    b: parseInt(hex.slice(5, 7), 16),
+  };
+}
+
+function hexToRgba(hex, alpha) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+// === Load / Init ===
 async function loadGraphView() {
   if (graphState && graphState.graphData) {
-    // Already loaded, just restart rendering
-    graphState.running = true;
-    renderGraph();
+    // Already loaded — resume the render loop
+    if (!graphState.animating) startRenderLoop();
     return;
   }
-
   try {
     const data = await invoke('get_graph_data');
     initGraph(data);
@@ -355,318 +364,477 @@ async function loadGraphView() {
 
 function initGraph(data) {
   const canvas = $graphCanvas;
-  const container = $graphContainer;
-  const rect = container.getBoundingClientRect();
+  const rect = $graphContainer.getBoundingClientRect();
   const width = rect.width || window.innerWidth;
   const height = rect.height || (window.innerHeight - 200);
   canvas.width = width * window.devicePixelRatio;
   canvas.height = height * window.devicePixelRatio;
   canvas.style.width = width + 'px';
   canvas.style.height = height + 'px';
-
   const ctx = canvas.getContext('2d');
   ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
 
-  // Build node map for quick lookup
+  // --- Build nodes ---
   const nodeMap = new Map();
-  const nodes = data.nodes.map((n, i) => {
+  const nodes = data.nodes.map(n => {
     const node = {
       ...n,
-      x: width / 2 + (Math.random() - 0.5) * width * 0.6,
-      y: height / 2 + (Math.random() - 0.5) * height * 0.6,
-      vx: 0,
-      vy: 0,
-      radius: 6,
+      x: 0, y: 0, vx: 0, vy: 0,
+      radius: 4,
       visible: true,
+      pinned: false,       // stays in place after drag
+      highlightAlpha: 0,   // animated highlight intensity (0..1)
     };
     nodeMap.set(n.id, node);
     return node;
   });
 
-  const edges = data.edges.map(e => ({
-    source: nodeMap.get(e.source),
-    target: nodeMap.get(e.target),
-    kind: e.kind,
-  })).filter(e => e.source && e.target);
+  // --- Build edges + adjacency ---
+  const edges = [];
+  const adjOut = new Map(); // id -> Set<id>
+  const adjIn  = new Map(); // id -> Set<id>
+  for (const e of data.edges) {
+    const s = nodeMap.get(e.source);
+    const t = nodeMap.get(e.target);
+    if (!s || !t) continue;
+    edges.push({ source: s, target: t, kind: e.kind });
+    if (!adjOut.has(s.id)) adjOut.set(s.id, new Set());
+    adjOut.get(s.id).add(t.id);
+    if (!adjIn.has(t.id)) adjIn.set(t.id, new Set());
+    adjIn.get(t.id).add(s.id);
+  }
 
-  // Build adjacency for degree calculation
+  // Degree & radius
   const degree = new Map();
   edges.forEach(e => {
     degree.set(e.source.id, (degree.get(e.source.id) || 0) + 1);
     degree.set(e.target.id, (degree.get(e.target.id) || 0) + 1);
   });
-  // Scale node radius by degree
   nodes.forEach(n => {
     const d = degree.get(n.id) || 0;
-    n.radius = Math.max(4, Math.min(16, 4 + Math.sqrt(d) * 2));
+    n.radius = Math.max(3, Math.min(14, 3 + Math.sqrt(d) * 1.8));
   });
 
-  // Package clustering: assign cluster centers
+  // --- Package clustering: initial placement ---
   const pkgSet = [...new Set(nodes.map(n => n.package))];
   const pkgCenters = new Map();
+  const clusterRadius = Math.min(width, height) * 0.32;
   pkgSet.forEach((pkg, i) => {
     const angle = (2 * Math.PI * i) / pkgSet.length;
-    const clusterRadius = Math.min(width, height) * 0.3;
     pkgCenters.set(pkg, {
       x: width / 2 + Math.cos(angle) * clusterRadius,
       y: height / 2 + Math.sin(angle) * clusterRadius,
     });
   });
-
-  // Set initial positions near cluster centers
   nodes.forEach(n => {
-    const center = pkgCenters.get(n.package);
-    if (center) {
-      n.x = center.x + (Math.random() - 0.5) * 80;
-      n.y = center.y + (Math.random() - 0.5) * 80;
+    const c = pkgCenters.get(n.package);
+    if (c) {
+      n.x = c.x + (Math.random() - 0.5) * 100;
+      n.y = c.y + (Math.random() - 0.5) * 100;
+    } else {
+      n.x = width / 2 + (Math.random() - 0.5) * width * 0.5;
+      n.y = height / 2 + (Math.random() - 0.5) * height * 0.5;
     }
   });
 
-  // Setup filter chips
+  // --- Filters & legend ---
   setupFilters(data.packages, nodes);
-
-  // Setup legend
   renderLegend(nodes);
 
+  // --- Graph state ---
   graphState = {
-    nodes,
-    edges,
-    nodeMap,
-    ctx,
-    canvas,
-    width,
-    height,
-    pkgCenters,
+    nodes, edges, nodeMap, adjOut, adjIn,
+    ctx, canvas, width, height, pkgCenters,
     graphData: data,
-    running: true,
-    // Interaction state
+    animating: false,
+
+    // Camera
     transform: { x: 0, y: 0, k: 1 },
-    dragging: null,
-    hoveredNode: null,
-    alpha: 1.0, // simulation temperature
-    alphaDecay: 0.0228,
+    targetTransform: { x: 0, y: 0, k: 1 }, // for smooth zoom
+
+    // Simulation
+    alpha: 1.0,
+    alphaTarget: 0.0,    // non-zero = never fully stops (set to ~0.02 for "breathing")
+    alphaDecay: 0.02,
     alphaMin: 0.001,
+    velocityDecay: 0.55, // lower = more damping, 0.4-0.6 feels organic
+
+    // Interaction
+    hoveredNode: null,
+    selectedNode: null,   // persisted click selection
+    dragging: null,
   };
 
   setupCanvasInteraction(canvas);
-  runSimulation();
+  startRenderLoop();
 }
 
-function runSimulation() {
-  if (!graphState || !graphState.running) return;
+// === Render loop (always running while graph is visible) ===
+function startRenderLoop() {
+  if (graphState.animating) return;
+  graphState.animating = true;
+  let lastTime = performance.now();
+  function loop(now) {
+    if (!graphState || currentView !== 'graph') {
+      graphState.animating = false;
+      return;
+    }
+    const dt = Math.min((now - lastTime) / 16.667, 2.0); // normalized to 60fps, capped
+    lastTime = now;
 
+    tickSimulation(dt);
+    tickAnimations(dt);
+    smoothZoom(dt);
+    renderGraph();
+
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+}
+
+// === PHYSICS ===
+function tickSimulation(dt) {
   const { nodes, edges, pkgCenters, width, height } = graphState;
 
-  if (graphState.alpha > graphState.alphaMin) {
-    // Apply forces
-    applyForces(nodes, edges, pkgCenters, width, height, graphState.alpha);
-    graphState.alpha *= (1 - graphState.alphaDecay);
+  // Alpha cooling toward target
+  const alphaDiff = graphState.alphaTarget - graphState.alpha;
+  graphState.alpha += alphaDiff * graphState.alphaDecay * dt;
+  if (Math.abs(graphState.alpha) < graphState.alphaMin && graphState.alphaTarget === 0) {
+    graphState.alpha = 0;
   }
+  if (graphState.alpha <= 0) return;
 
-  renderGraph();
-  requestAnimationFrame(runSimulation);
-}
+  const alpha = graphState.alpha;
+  const visibleNodes = [];
+  for (const n of nodes) {
+    if (n.visible) visibleNodes.push(n);
+  }
+  const visibleSet = new Set();
+  for (const n of visibleNodes) visibleSet.add(n.id);
 
-function applyForces(nodes, edges, pkgCenters, width, height, alpha) {
-  const visibleNodes = nodes.filter(n => n.visible);
-  const visibleSet = new Set(visibleNodes.map(n => n.id));
-
-  // Repulsion (Barnes-Hut approximation for performance)
-  const repulsionStrength = -120;
+  // 1. Many-body repulsion (with distance cutoff for perf)
+  const repulsion = -200;
+  const cutoff = 500;
   for (let i = 0; i < visibleNodes.length; i++) {
+    const a = visibleNodes[i];
+    if (a.pinned) continue;
     for (let j = i + 1; j < visibleNodes.length; j++) {
-      const a = visibleNodes[i];
       const b = visibleNodes[j];
       let dx = b.x - a.x;
       let dy = b.y - a.y;
-      let dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      if (dist > 300) continue; // optimization: skip far nodes
-      const force = repulsionStrength * alpha / (dist * dist);
-      const fx = dx / dist * force;
-      const fy = dy / dist * force;
-      a.vx -= fx;
-      a.vy -= fy;
-      b.vx += fx;
-      b.vy += fy;
+      const distSq = dx * dx + dy * dy;
+      if (distSq > cutoff * cutoff) continue;
+      const dist = Math.sqrt(distSq) || 0.5;
+      const strength = repulsion * alpha / (dist * dist);
+      const fx = (dx / dist) * strength;
+      const fy = (dy / dist) * strength;
+      if (!a.pinned) { a.vx -= fx; a.vy -= fy; }
+      if (!b.pinned) { b.vx += fx; b.vy += fy; }
     }
   }
 
-  // Edge attraction
-  const linkStrength = 0.05;
-  const linkDistance = 60;
-  edges.forEach(e => {
-    if (!visibleSet.has(e.source.id) || !visibleSet.has(e.target.id)) return;
+  // 2. Link spring force
+  const linkDist = 80;
+  const linkStrength = 0.08;
+  for (const e of edges) {
+    if (!visibleSet.has(e.source.id) || !visibleSet.has(e.target.id)) continue;
     let dx = e.target.x - e.source.x;
     let dy = e.target.y - e.source.y;
-    let dist = Math.sqrt(dx * dx + dy * dy) || 1;
-    const force = (dist - linkDistance) * linkStrength * alpha;
-    const fx = dx / dist * force;
-    const fy = dy / dist * force;
-    e.source.vx += fx;
-    e.source.vy += fy;
-    e.target.vx -= fx;
-    e.target.vy -= fy;
-  });
+    const dist = Math.sqrt(dx * dx + dy * dy) || 0.5;
+    const displacement = dist - linkDist;
+    const strength = displacement * linkStrength * alpha;
+    const fx = (dx / dist) * strength;
+    const fy = (dy / dist) * strength;
+    if (!e.source.pinned) { e.source.vx += fx; e.source.vy += fy; }
+    if (!e.target.pinned) { e.target.vx -= fx; e.target.vy -= fy; }
+  }
 
-  // Package clustering force
-  const clusterStrength = 0.15;
-  visibleNodes.forEach(n => {
-    const center = pkgCenters.get(n.package);
-    if (center) {
-      n.vx += (center.x - n.x) * clusterStrength * alpha;
-      n.vy += (center.y - n.y) * clusterStrength * alpha;
+  // 3. Collision (prevent overlap)
+  for (let i = 0; i < visibleNodes.length; i++) {
+    const a = visibleNodes[i];
+    for (let j = i + 1; j < visibleNodes.length; j++) {
+      const b = visibleNodes[j];
+      let dx = b.x - a.x;
+      let dy = b.y - a.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 0.5;
+      const minDist = a.radius + b.radius + 2;
+      if (dist < minDist) {
+        const overlap = (minDist - dist) * 0.5;
+        const nx = dx / dist;
+        const ny = dy / dist;
+        if (!a.pinned) { a.x -= nx * overlap; a.y -= ny * overlap; }
+        if (!b.pinned) { b.x += nx * overlap; b.y += ny * overlap; }
+      }
     }
-  });
+  }
 
-  // Center gravity
-  const gravityStrength = 0.01;
-  visibleNodes.forEach(n => {
-    n.vx += (width / 2 - n.x) * gravityStrength * alpha;
-    n.vy += (height / 2 - n.y) * gravityStrength * alpha;
-  });
+  // 4. Package clustering (gentle)
+  const clusterStr = 0.06;
+  for (const n of visibleNodes) {
+    if (n.pinned) continue;
+    const c = pkgCenters.get(n.package);
+    if (c) {
+      n.vx += (c.x - n.x) * clusterStr * alpha;
+      n.vy += (c.y - n.y) * clusterStr * alpha;
+    }
+  }
 
-  // Velocity damping and position update
-  const damping = 0.6;
-  visibleNodes.forEach(n => {
-    n.vx *= damping;
-    n.vy *= damping;
-    n.x += n.vx;
-    n.y += n.vy;
-    // Keep within bounds (soft boundary)
-    const margin = 20;
-    if (n.x < margin) n.x = margin;
-    if (n.x > width - margin) n.x = width - margin;
-    if (n.y < margin) n.y = margin;
-    if (n.y > height - margin) n.y = height - margin;
-  });
+  // 5. Center gravity (soft)
+  const cx = width / 2, cy = height / 2;
+  const gravity = 0.015;
+  for (const n of visibleNodes) {
+    if (n.pinned) continue;
+    n.vx += (cx - n.x) * gravity * alpha;
+    n.vy += (cy - n.y) * gravity * alpha;
+  }
+
+  // 6. Integrate (Velocity Verlet-ish: apply velocity with damping)
+  const decay = graphState.velocityDecay;
+  for (const n of visibleNodes) {
+    if (n.pinned) { n.vx = 0; n.vy = 0; continue; }
+    n.vx *= decay;
+    n.vy *= decay;
+    n.x += n.vx * dt;
+    n.y += n.vy * dt;
+  }
 }
 
+// === Smooth per-node highlight animation ===
+function tickAnimations(dt) {
+  const { nodes, edges, hoveredNode, selectedNode } = graphState;
+  const activeNode = hoveredNode || selectedNode;
+  const connectedSet = new Set();
+  if (activeNode) {
+    connectedSet.add(activeNode.id);
+    for (const e of edges) {
+      if (e.source.id === activeNode.id) connectedSet.add(e.target.id);
+      if (e.target.id === activeNode.id) connectedSet.add(e.source.id);
+    }
+  }
+
+  const speed = 0.12 * dt; // animation speed
+  for (const n of nodes) {
+    if (!n.visible) continue;
+    const target = activeNode ? (connectedSet.has(n.id) ? 1.0 : 0.0) : 1.0;
+    n.highlightAlpha += (target - n.highlightAlpha) * speed;
+    // clamp
+    if (n.highlightAlpha < 0.01) n.highlightAlpha = 0;
+    if (n.highlightAlpha > 0.99) n.highlightAlpha = 1;
+  }
+}
+
+// === Smooth animated zoom ===
+function smoothZoom(dt) {
+  const t = graphState.transform;
+  const tt = graphState.targetTransform;
+  const lerp = 0.18 * dt;
+  t.x += (tt.x - t.x) * lerp;
+  t.y += (tt.y - t.y) * lerp;
+  t.k += (tt.k - t.k) * lerp;
+  // snap when close
+  if (Math.abs(tt.k - t.k) < 0.001) t.k = tt.k;
+  if (Math.abs(tt.x - t.x) < 0.1) t.x = tt.x;
+  if (Math.abs(tt.y - t.y) < 0.1) t.y = tt.y;
+}
+
+// === RENDERING ===
 function renderGraph() {
   if (!graphState) return;
-  const { ctx, canvas, nodes, edges, width, height, transform, hoveredNode } = graphState;
+  const { ctx, nodes, edges, width, height, transform, hoveredNode, selectedNode } = graphState;
+  const activeNode = hoveredNode || selectedNode;
+  const dpr = window.devicePixelRatio;
+  const k = transform.k;
 
   ctx.save();
-  ctx.setTransform(window.devicePixelRatio, 0, 0, window.devicePixelRatio, 0, 0);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, width, height);
-
-  // Apply zoom/pan transform
   ctx.translate(transform.x, transform.y);
-  ctx.scale(transform.k, transform.k);
+  ctx.scale(k, k);
 
-  const visibleSet = new Set(nodes.filter(n => n.visible).map(n => n.id));
+  // Pre-build connected set for active node
+  const connectedSet = new Set();
+  if (activeNode) {
+    connectedSet.add(activeNode.id);
+    for (const e of edges) {
+      if (e.source.id === activeNode.id) connectedSet.add(e.target.id);
+      if (e.target.id === activeNode.id) connectedSet.add(e.source.id);
+    }
+  }
 
-  // Draw edges
-  ctx.lineWidth = 0.5 / transform.k;
-  ctx.strokeStyle = 'rgba(48, 54, 61, 0.6)';
-  ctx.beginPath();
-  edges.forEach(e => {
-    if (!visibleSet.has(e.source.id) || !visibleSet.has(e.target.id)) return;
+  // --- 1. Draw edges (base layer) ---
+  ctx.lineCap = 'round';
+  for (const e of edges) {
+    if (!e.source.visible || !e.target.visible) continue;
+
+    const isHighlighted = activeNode && (
+      e.source.id === activeNode.id || e.target.id === activeNode.id
+    );
+
+    if (isHighlighted) continue; // draw highlighted edges on top
+
+    const avgAlpha = (e.source.highlightAlpha + e.target.highlightAlpha) / 2;
+    const edgeAlpha = activeNode ? avgAlpha * 0.2 + 0.03 : 0.12;
+
+    ctx.strokeStyle = `rgba(136,152,170,${edgeAlpha})`;
+    ctx.lineWidth = 0.6 / k;
+    ctx.beginPath();
     ctx.moveTo(e.source.x, e.source.y);
     ctx.lineTo(e.target.x, e.target.y);
-  });
-  ctx.stroke();
-
-  // Draw edges for hovered node highlighted
-  if (hoveredNode && hoveredNode.visible) {
-    ctx.lineWidth = 1.5 / transform.k;
-    ctx.strokeStyle = 'rgba(88, 166, 255, 0.5)';
-    ctx.beginPath();
-    edges.forEach(e => {
-      if (!visibleSet.has(e.source.id) || !visibleSet.has(e.target.id)) return;
-      if (e.source.id === hoveredNode.id || e.target.id === hoveredNode.id) {
-        ctx.moveTo(e.source.x, e.source.y);
-        ctx.lineTo(e.target.x, e.target.y);
-      }
-    });
     ctx.stroke();
   }
 
-  // Draw nodes
-  nodes.forEach(n => {
-    if (!n.visible) return;
-    const color = KIND_COLORS[n.kind] || '#8b949e';
-    const isHovered = hoveredNode && hoveredNode.id === n.id;
-    const isConnected = hoveredNode && edges.some(
-      e => (e.source.id === hoveredNode.id && e.target.id === n.id) ||
-           (e.target.id === hoveredNode.id && e.source.id === n.id)
-    );
-    const dimmed = hoveredNode && !isHovered && !isConnected;
+  // --- 2. Draw highlighted edges ---
+  if (activeNode) {
+    for (const e of edges) {
+      if (!e.source.visible || !e.target.visible) continue;
+      if (e.source.id !== activeNode.id && e.target.id !== activeNode.id) continue;
 
-    ctx.beginPath();
-    ctx.arc(n.x, n.y, n.radius / transform.k * (isHovered ? 1.3 : 1), 0, Math.PI * 2);
-
-    if (dimmed) {
-      ctx.fillStyle = hexToRgba(color, 0.15);
-    } else {
-      ctx.fillStyle = hexToRgba(color, 0.8);
-    }
-    ctx.fill();
-
-    if (isHovered) {
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 2 / transform.k;
+      // Use the color of the "other" end for variety
+      const other = e.source.id === activeNode.id ? e.target : e.source;
+      const color = KIND_COLORS[other.kind] || '#8b949e';
+      ctx.strokeStyle = hexToRgba(color, 0.45);
+      ctx.lineWidth = 1.2 / k;
+      ctx.beginPath();
+      ctx.moveTo(e.source.x, e.source.y);
+      ctx.lineTo(e.target.x, e.target.y);
       ctx.stroke();
     }
-  });
+  }
 
-  // Draw labels for zoomed-in view or hovered
-  if (transform.k > 1.2 || hoveredNode) {
-    ctx.font = `${Math.max(9, 11 / transform.k)}px "JetBrains Mono", monospace`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    nodes.forEach(n => {
-      if (!n.visible) return;
-      const isHovered = hoveredNode && hoveredNode.id === n.id;
-      const isConnected = hoveredNode && edges.some(
-        e => (e.source.id === hoveredNode.id && e.target.id === n.id) ||
-             (e.target.id === hoveredNode.id && e.source.id === n.id)
-      );
-      const dimmed = hoveredNode && !isHovered && !isConnected;
-      if (dimmed) return;
-      if (!isHovered && !isConnected && transform.k <= 1.2) return;
+  // --- 3. Draw node glow + body ---
+  for (const n of nodes) {
+    if (!n.visible) continue;
+    const color = KIND_COLORS[n.kind] || '#8b949e';
+    const rgb = KIND_RGB[n.kind] || { r: 139, g: 148, b: 158 };
+    const isActive = activeNode && activeNode.id === n.id;
+    const isConnected = connectedSet.has(n.id);
+    const ha = n.highlightAlpha;
+    const r = n.radius;
+    const screenR = r; // radius in world coords
 
-      const color = KIND_COLORS[n.kind] || '#8b949e';
-      ctx.fillStyle = isHovered ? '#ffffff' : color;
-      ctx.fillText(n.name, n.x, n.y + n.radius / transform.k + 3 / transform.k);
-    });
+    // Glow (radial gradient) — only for highlighted or when no selection
+    if (ha > 0.3) {
+      const glowR = screenR * (isActive ? 4 : 2.5);
+      const glowAlpha = ha * (isActive ? 0.35 : 0.15);
+      const grad = ctx.createRadialGradient(n.x, n.y, screenR * 0.5, n.x, n.y, glowR);
+      grad.addColorStop(0, `rgba(${rgb.r},${rgb.g},${rgb.b},${glowAlpha})`);
+      grad.addColorStop(1, `rgba(${rgb.r},${rgb.g},${rgb.b},0)`);
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, glowR, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Node body
+    const bodyAlpha = activeNode
+      ? (isActive ? 1.0 : (isConnected ? 0.9 : 0.08 + ha * 0.1))
+      : 0.85;
+    const scale = isActive ? 1.35 : (isConnected && activeNode ? 1.1 : 1.0);
+    ctx.fillStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},${bodyAlpha})`;
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, screenR * scale, 0, Math.PI * 2);
+    ctx.fill();
+
+    // White ring on active/selected
+    if (isActive) {
+      ctx.strokeStyle = `rgba(255,255,255,0.8)`;
+      ctx.lineWidth = 1.5 / k;
+      ctx.stroke();
+    }
+
+    // Pin indicator
+    if (n.pinned) {
+      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, 1.5 / k, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // --- 4. Labels ---
+  const showAllLabels = k > 0.8;
+  const fontSize = Math.max(8, Math.min(12, 10 / k));
+  ctx.font = `500 ${fontSize}px "JetBrains Mono", monospace`;
+  ctx.textAlign = 'center';
+
+  for (const n of nodes) {
+    if (!n.visible) continue;
+
+    const isActive = activeNode && activeNode.id === n.id;
+    const isConnected = connectedSet.has(n.id);
+    const ha = n.highlightAlpha;
+
+    // Show labels when: active/connected, or zoomed in enough with enough highlight
+    const shouldShow = isActive || (isConnected && activeNode) || (showAllLabels && ha > 0.5);
+    if (!shouldShow) continue;
+
+    const color = KIND_COLORS[n.kind] || '#8b949e';
+    const labelY = n.y + n.radius + fontSize * 0.6 + 2;
+    const labelAlpha = isActive ? 1.0 : (isConnected ? 0.9 : ha * 0.7);
+
+    // Background pill for readability
+    const textWidth = ctx.measureText(n.name).width;
+    const pillPadH = 4;
+    const pillPadV = 2;
+    ctx.fillStyle = `rgba(13,17,23,${labelAlpha * 0.75})`;
+    const pillR = (fontSize * 0.35);
+    roundRect(ctx,
+      n.x - textWidth / 2 - pillPadH,
+      labelY - fontSize * 0.45 - pillPadV,
+      textWidth + pillPadH * 2,
+      fontSize + pillPadV * 2,
+      pillR
+    );
+    ctx.fill();
+
+    // Text
+    ctx.fillStyle = isActive
+      ? `rgba(255,255,255,${labelAlpha})`
+      : hexToRgba(color, labelAlpha);
+    ctx.textBaseline = 'middle';
+    ctx.fillText(n.name, n.x, labelY);
   }
 
   ctx.restore();
 }
 
-function hexToRgba(hex, alpha) {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return `rgba(${r},${g},${b},${alpha})`;
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.arcTo(x + w, y, x + w, y + r, r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+  ctx.lineTo(x + r, y + h);
+  ctx.arcTo(x, y + h, x, y + h - r, r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+  ctx.closePath();
 }
 
-// === Canvas Interaction (zoom, pan, drag, hover, click) ===
+// === CANVAS INTERACTION ===
 function setupCanvasInteraction(canvas) {
   let isPanning = false;
   let panStart = { x: 0, y: 0 };
   let dragNode = null;
+  let dragStartPos = null; // to detect click vs drag
+  let mouseDownTime = 0;
 
   function screenToWorld(sx, sy) {
     const t = graphState.transform;
-    return {
-      x: (sx - t.x) / t.k,
-      y: (sy - t.y) / t.k,
-    };
+    return { x: (sx - t.x) / t.k, y: (sy - t.y) / t.k };
   }
 
   function hitTest(sx, sy) {
     const { x, y } = screenToWorld(sx, sy);
-    const { nodes, transform } = graphState;
     let closest = null;
     let closestDist = Infinity;
-    for (const n of nodes) {
+    for (const n of graphState.nodes) {
       if (!n.visible) continue;
-      const dx = n.x - x;
-      const dy = n.y - y;
+      const dx = n.x - x, dy = n.y - y;
       const dist = Math.sqrt(dx * dx + dy * dy);
-      const hitRadius = n.radius / transform.k + 4 / transform.k;
-      if (dist < hitRadius && dist < closestDist) {
+      const hitR = n.radius + 6 / graphState.transform.k;
+      if (dist < hitR && dist < closestDist) {
         closest = n;
         closestDist = dist;
       }
@@ -674,45 +842,43 @@ function setupCanvasInteraction(canvas) {
     return closest;
   }
 
+  // --- Smooth zoom on wheel ---
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
-    const t = graphState.transform;
+    const tt = graphState.targetTransform;
     const rect = canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
 
-    const zoomFactor = e.deltaY < 0 ? 1.1 : 0.9;
-    const newK = Math.max(0.1, Math.min(10, t.k * zoomFactor));
+    const factor = e.deltaY < 0 ? 1.12 : 0.89;
+    const newK = Math.max(0.05, Math.min(12, tt.k * factor));
 
-    // Zoom toward mouse position
-    t.x = mx - (mx - t.x) * (newK / t.k);
-    t.y = my - (my - t.y) * (newK / t.k);
-    t.k = newK;
-
-    renderGraph();
+    // Zoom toward cursor (applied to target, smoothed in loop)
+    tt.x = mx - (mx - tt.x) * (newK / tt.k);
+    tt.y = my - (my - tt.y) * (newK / tt.k);
+    tt.k = newK;
   }, { passive: false });
 
+  // --- Mouse down: drag node or pan ---
   canvas.addEventListener('mousedown', (e) => {
     const rect = canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
+    mouseDownTime = performance.now();
 
     const node = hitTest(mx, my);
     if (node) {
       dragNode = node;
+      dragStartPos = { x: node.x, y: node.y };
       graphState.dragging = node;
-      // Reheat simulation slightly on drag
-      graphState.alpha = Math.max(graphState.alpha, 0.1);
-      if (!graphState.running) {
-        graphState.running = true;
-        runSimulation();
-      }
+      reheat(0.3);
     } else {
       isPanning = true;
-      panStart = { x: mx - graphState.transform.x, y: my - graphState.transform.y };
+      panStart = { x: mx - graphState.targetTransform.x, y: my - graphState.targetTransform.y };
     }
   });
 
+  // --- Mouse move: drag / pan / hover ---
   canvas.addEventListener('mousemove', (e) => {
     const rect = canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left;
@@ -724,146 +890,175 @@ function setupCanvasInteraction(canvas) {
       dragNode.y = world.y;
       dragNode.vx = 0;
       dragNode.vy = 0;
-      renderGraph();
       return;
     }
 
     if (isPanning) {
-      graphState.transform.x = mx - panStart.x;
-      graphState.transform.y = my - panStart.y;
-      renderGraph();
+      graphState.targetTransform.x = mx - panStart.x;
+      graphState.targetTransform.y = my - panStart.y;
+      // For panning, apply immediately (no lerp lag)
+      graphState.transform.x = graphState.targetTransform.x;
+      graphState.transform.y = graphState.targetTransform.y;
       return;
     }
 
-    // Hover detection
+    // Hover
     const node = hitTest(mx, my);
     if (node !== graphState.hoveredNode) {
       graphState.hoveredNode = node;
       canvas.style.cursor = node ? 'pointer' : 'grab';
 
       if (node) {
-        $graphTooltip.innerHTML = `
-          <span class="tooltip-kind" style="color:${KIND_COLORS[node.kind] || '#8b949e'}">${KIND_LABELS[node.kind] || '??'}</span>
-          <span class="tooltip-name">${escapeHtml(node.name)}</span>
-          <span class="tooltip-meta">${escapeHtml(node.package)} &middot; ${escapeHtml(node.file)}:${node.line}</span>
-        `;
-        $graphTooltip.style.left = (e.clientX - $graphContainer.getBoundingClientRect().left + 12) + 'px';
-        $graphTooltip.style.top = (e.clientY - $graphContainer.getBoundingClientRect().top - 10) + 'px';
+        const kind = KIND_LABELS[node.kind] || '??';
+        const kindColor = KIND_COLORS[node.kind] || '#8b949e';
+        $graphTooltip.innerHTML =
+          `<span class="tooltip-kind" style="color:${kindColor}">${kind}</span>` +
+          `<span class="tooltip-name">${escapeHtml(node.name)}</span>` +
+          `<span class="tooltip-meta">${escapeHtml(node.package)} · ${escapeHtml(node.file)}:${node.line}</span>`;
         $graphTooltip.classList.remove('hidden');
       } else {
         $graphTooltip.classList.add('hidden');
       }
+    }
 
-      renderGraph();
+    // Update tooltip position (even if same node — follow mouse)
+    if (graphState.hoveredNode) {
+      const contRect = $graphContainer.getBoundingClientRect();
+      $graphTooltip.style.left = (e.clientX - contRect.left + 14) + 'px';
+      $graphTooltip.style.top = (e.clientY - contRect.top - 8) + 'px';
     }
   });
 
+  // --- Mouse up: end drag/pan, detect click ---
   canvas.addEventListener('mouseup', (e) => {
+    const elapsed = performance.now() - mouseDownTime;
+
     if (dragNode) {
+      // Was this a click (short, no movement)?
+      const moved = dragStartPos
+        ? Math.hypot(dragNode.x - dragStartPos.x, dragNode.y - dragStartPos.y)
+        : 999;
+
+      if (elapsed < 250 && moved < 5) {
+        // Click — toggle selection
+        if (graphState.selectedNode === dragNode) {
+          graphState.selectedNode = null;
+          dragNode.pinned = false;
+        } else {
+          graphState.selectedNode = dragNode;
+        }
+      } else {
+        // Drag completed — pin the node
+        dragNode.pinned = true;
+      }
+
       dragNode = null;
+      dragStartPos = null;
       graphState.dragging = null;
       return;
     }
-    isPanning = false;
+
+    if (isPanning) {
+      isPanning = false;
+      // Click on empty space — deselect
+      if (elapsed < 200) {
+        graphState.selectedNode = null;
+      }
+    }
   });
 
   canvas.addEventListener('mouseleave', () => {
     isPanning = false;
-    dragNode = null;
-    graphState.dragging = null;
+    if (dragNode) {
+      dragNode.pinned = true;
+      dragNode = null;
+      graphState.dragging = null;
+    }
     graphState.hoveredNode = null;
     $graphTooltip.classList.add('hidden');
-    renderGraph();
   });
 
-  // Double-click to focus entity
+  // --- Double-click: focus entity ---
   canvas.addEventListener('dblclick', (e) => {
     const rect = canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-    const node = hitTest(mx, my);
-    if (node) {
-      focusEntity(node.id);
-    }
+    const node = hitTest(e.clientX - rect.left, e.clientY - rect.top);
+    if (node) focusEntity(node.id);
   });
 }
 
-// === Graph Filters ===
-function setupFilters(packages, nodes) {
-  // Kind filter chips
-  const kinds = [...new Set(nodes.map(n => n.kind))].sort();
-  $kindFilters.innerHTML = kinds.map(k => `
-    <button class="filter-chip active" data-kind="${k}" onclick="toggleKindFilter(this, '${k}')">
-      <span class="chip-dot" style="background:${KIND_COLORS[k] || '#8b949e'}"></span>
-      ${KIND_LABELS[k] || k}
-    </button>
-  `).join('');
-
-  // Package dropdown
-  $packageFilter.innerHTML = '<option value="">All packages</option>' +
-    packages.map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('');
-
-  $packageFilter.onchange = () => applyFilters();
+function reheat(target) {
+  graphState.alpha = Math.max(graphState.alpha, target);
+  graphState.alphaTarget = 0;
 }
 
-function toggleKindFilter(btn, kind) {
+// === FILTERS ===
+function setupFilters(packages, nodes) {
+  const kinds = [...new Set(nodes.map(n => n.kind))].sort();
+  $kindFilters.innerHTML = kinds.map(k =>
+    `<button class="filter-chip active" data-kind="${k}" onclick="toggleKindFilter(this)">` +
+    `<span class="chip-dot" style="background:${KIND_COLORS[k] || '#8b949e'}"></span>` +
+    `${KIND_LABELS[k] || k}</button>`
+  ).join('');
+
+  // Package chips (all active by default)
+  $packageFilters.innerHTML = packages.map(p =>
+    `<button class="filter-chip pkg-chip active" data-pkg="${escapeHtml(p)}" onclick="togglePkgFilter(this)">` +
+    `${escapeHtml(p)}</button>`
+  ).join('');
+}
+
+function toggleKindFilter(btn) {
   btn.classList.toggle('active');
   applyFilters();
 }
 window.toggleKindFilter = toggleKindFilter;
 
+function togglePkgFilter(btn) {
+  btn.classList.toggle('active');
+  applyFilters();
+}
+window.togglePkgFilter = togglePkgFilter;
+
 function applyFilters() {
   if (!graphState) return;
 
-  // Get active kind filters
   const activeKinds = new Set();
-  $kindFilters.querySelectorAll('.filter-chip.active').forEach(chip => {
-    activeKinds.add(chip.dataset.kind);
-  });
+  $kindFilters.querySelectorAll('.filter-chip.active').forEach(c => activeKinds.add(c.dataset.kind));
 
-  const selectedPkg = $packageFilter.value;
+  const activePkgs = new Set();
+  $packageFilters.querySelectorAll('.filter-chip.active').forEach(c => activePkgs.add(c.dataset.pkg));
 
   graphState.nodes.forEach(n => {
-    n.visible = activeKinds.has(n.kind) && (!selectedPkg || n.package === selectedPkg);
+    n.visible = activeKinds.has(n.kind) && activePkgs.has(n.package);
   });
 
-  // Reheat simulation
-  graphState.alpha = 0.3;
-  if (!graphState.running) {
-    graphState.running = true;
-    runSimulation();
-  }
-
-  renderGraph();
+  reheat(0.5);
 }
 
 function renderLegend(nodes) {
   const kinds = [...new Set(nodes.map(n => n.kind))].sort();
-  $graphLegend.innerHTML = kinds.map(k => `
-    <span class="legend-item">
-      <span class="legend-dot" style="background:${KIND_COLORS[k] || '#8b949e'}"></span>
-      ${k}
-    </span>
-  `).join('');
+  $graphLegend.innerHTML = kinds.map(k =>
+    `<span class="legend-item">` +
+    `<span class="legend-dot" style="background:${KIND_COLORS[k] || '#8b949e'}"></span>${k}</span>`
+  ).join('');
 }
 
-// === Handle resize for graph ===
+// === Resize ===
 window.addEventListener('resize', () => {
-  if (graphState && currentView === 'graph') {
-    const rect = $graphContainer.getBoundingClientRect();
-    const width = rect.width || window.innerWidth;
-    const height = rect.height || (window.innerHeight - 200);
-    graphState.canvas.width = width * window.devicePixelRatio;
-    graphState.canvas.height = height * window.devicePixelRatio;
-    graphState.canvas.style.width = width + 'px';
-    graphState.canvas.style.height = height + 'px';
-    graphState.width = width;
-    graphState.height = height;
-    const ctx = graphState.canvas.getContext('2d');
-    ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
-    graphState.ctx = ctx;
-    renderGraph();
-  }
+  if (!graphState || currentView !== 'graph') return;
+  const rect = $graphContainer.getBoundingClientRect();
+  const w = rect.width || window.innerWidth;
+  const h = rect.height || (window.innerHeight - 200);
+  const dpr = window.devicePixelRatio;
+  graphState.canvas.width = w * dpr;
+  graphState.canvas.height = h * dpr;
+  graphState.canvas.style.width = w + 'px';
+  graphState.canvas.style.height = h + 'px';
+  graphState.width = w;
+  graphState.height = h;
+  const ctx = graphState.canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  graphState.ctx = ctx;
 });
 
 // === Keyboard shortcuts ===
