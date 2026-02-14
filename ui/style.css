@@ -628,6 +628,14 @@ body {
   display: inline-block;
 }
 
+.filter-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+  flex-shrink: 0;
+  margin: 0 0.2rem;
+}
+
 .filter-chip.pkg-chip {
   text-transform: none;
   font-weight: 500;
