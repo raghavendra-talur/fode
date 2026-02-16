@@ -268,7 +268,7 @@ pub fn get_graph_data(state: State<AppState>) -> Result<GraphData, String> {
     let graph = state.entity_graph.lock().unwrap();
     let graph = graph.as_ref().ok_or("No repo loaded")?;
 
-    let nodes: Vec<GraphNode> = graph
+    let mut nodes: Vec<GraphNode> = graph
         .entities
         .iter()
         .map(|e| GraphNode {
@@ -281,11 +281,33 @@ pub fn get_graph_data(state: State<AppState>) -> Result<GraphData, String> {
         })
         .collect();
 
-    // Build a set of valid entity IDs for filtering edges
-    let valid_ids: std::collections::HashSet<&str> =
-        graph.entities.iter().map(|e| e.id.as_str()).collect();
+    // Collect unique packages and create package nodes + Contains edges
+    let mut pkg_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for e in &graph.entities {
+        if !e.package.is_empty() {
+            pkg_set.insert(e.package.clone());
+        }
+    }
+    let mut packages: Vec<String> = pkg_set.into_iter().collect();
+    packages.sort();
 
-    let edges: Vec<GraphEdge> = graph
+    // Add a Package node for each unique package
+    for pkg in &packages {
+        nodes.push(GraphNode {
+            id: format!("pkg::{}", pkg),
+            name: pkg.clone(),
+            kind: "package".to_string(),
+            package: pkg.clone(),
+            file: String::new(),
+            line: 0,
+        });
+    }
+
+    // Build a set of valid node IDs (entities + package nodes)
+    let valid_ids: std::collections::HashSet<&str> =
+        nodes.iter().map(|n| n.id.as_str()).collect();
+
+    let mut edges: Vec<GraphEdge> = graph
         .relations
         .iter()
         .filter(|r| valid_ids.contains(r.from_id.as_str()) && valid_ids.contains(r.to_id.as_str()))
@@ -296,15 +318,16 @@ pub fn get_graph_data(state: State<AppState>) -> Result<GraphData, String> {
         })
         .collect();
 
-    // Collect unique packages
-    let mut pkg_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Add Contains edges from package nodes to their member entities
     for e in &graph.entities {
         if !e.package.is_empty() {
-            pkg_set.insert(e.package.clone());
+            edges.push(GraphEdge {
+                source: format!("pkg::{}", e.package),
+                target: e.id.clone(),
+                kind: "Contains".to_string(),
+            });
         }
     }
-    let mut packages: Vec<String> = pkg_set.into_iter().collect();
-    packages.sort();
 
     Ok(GraphData {
         nodes,

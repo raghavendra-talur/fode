@@ -412,7 +412,11 @@ function initGraph(data) {
   });
   nodes.forEach(n => {
     const d = degree.get(n.id) || 0;
-    n.radius = Math.max(3, Math.min(14, 3 + Math.sqrt(d) * 1.8));
+    if (n.kind === 'package') {
+      n.radius = Math.max(10, Math.min(22, 10 + Math.sqrt(d) * 1.2));
+    } else {
+      n.radius = Math.max(3, Math.min(14, 3 + Math.sqrt(d) * 1.8));
+    }
   });
 
   // --- Package clustering: initial placement ---
@@ -496,7 +500,36 @@ function startRenderLoop() {
   requestAnimationFrame(loop);
 }
 
-// === PHYSICS ===
+// === PHYSICS (spatial-grid accelerated) ===
+
+// Reusable spatial grid to avoid per-frame allocation
+const _grid = { cells: new Map(), cellSize: 0 };
+
+function _gridClear(cellSize) {
+  _grid.cells.clear();
+  _grid.cellSize = cellSize;
+}
+
+function _gridInsert(node) {
+  const cs = _grid.cellSize;
+  const key = ((node.x / cs | 0) * 73856093) ^ ((node.y / cs | 0) * 19349663);
+  let bucket = _grid.cells.get(key);
+  if (!bucket) { bucket = []; _grid.cells.set(key, bucket); }
+  bucket.push(node);
+}
+
+function _gridNeighborKeys(x, y) {
+  const cs = _grid.cellSize;
+  const cx = x / cs | 0, cy = y / cs | 0;
+  const keys = [];
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      keys.push(((cx + dx) * 73856093) ^ ((cy + dy) * 19349663));
+    }
+  }
+  return keys;
+}
+
 function tickSimulation(dt) {
   const { nodes, edges, pkgCenters, width, height } = graphState;
 
@@ -515,25 +548,34 @@ function tickSimulation(dt) {
   }
   const visibleSet = new Set();
   for (const n of visibleNodes) visibleSet.add(n.id);
+  const N = visibleNodes.length;
 
-  // 1. Many-body repulsion (with distance cutoff for perf)
+  // 1. Many-body repulsion via spatial grid (O(n) amortized instead of O(n²))
   const repulsion = -200;
-  const cutoff = 500;
-  for (let i = 0; i < visibleNodes.length; i++) {
-    const a = visibleNodes[i];
-    if (a.pinned) continue;
-    for (let j = i + 1; j < visibleNodes.length; j++) {
-      const b = visibleNodes[j];
-      let dx = b.x - a.x;
-      let dy = b.y - a.y;
-      const distSq = dx * dx + dy * dy;
-      if (distSq > cutoff * cutoff) continue;
-      const dist = Math.sqrt(distSq) || 0.5;
-      const strength = repulsion * alpha / (dist * dist);
-      const fx = (dx / dist) * strength;
-      const fy = (dy / dist) * strength;
-      if (!a.pinned) { a.vx -= fx; a.vy -= fy; }
-      if (!b.pinned) { b.vx += fx; b.vy += fy; }
+  const cutoff = N > 800 ? 250 : 500;
+  const cutoffSq = cutoff * cutoff;
+  _gridClear(cutoff);
+  for (const n of visibleNodes) _gridInsert(n);
+
+  for (const n of visibleNodes) {
+    if (n.pinned) continue;
+    const nkeys = _gridNeighborKeys(n.x, n.y);
+    for (const key of nkeys) {
+      const bucket = _grid.cells.get(key);
+      if (!bucket) continue;
+      for (const m of bucket) {
+        if (m.id <= n.id) continue; // avoid double-counting (lexicographic)
+        const dx = m.x - n.x;
+        const dy = m.y - n.y;
+        const distSq = dx * dx + dy * dy;
+        if (distSq > cutoffSq) continue;
+        const dist = Math.sqrt(distSq) || 0.5;
+        const strength = repulsion * alpha / (dist * dist);
+        const fx = (dx / dist) * strength;
+        const fy = (dy / dist) * strength;
+        if (!n.pinned) { n.vx -= fx; n.vy -= fy; }
+        if (!m.pinned) { m.vx += fx; m.vy += fy; }
+      }
     }
   }
 
@@ -553,21 +595,29 @@ function tickSimulation(dt) {
     if (!e.target.pinned) { e.target.vx -= fx; e.target.vy -= fy; }
   }
 
-  // 3. Collision (prevent overlap)
-  for (let i = 0; i < visibleNodes.length; i++) {
-    const a = visibleNodes[i];
-    for (let j = i + 1; j < visibleNodes.length; j++) {
-      const b = visibleNodes[j];
-      let dx = b.x - a.x;
-      let dy = b.y - a.y;
-      const dist = Math.sqrt(dx * dx + dy * dy) || 0.5;
-      const minDist = a.radius + b.radius + 2;
-      if (dist < minDist) {
-        const overlap = (minDist - dist) * 0.5;
-        const nx = dx / dist;
-        const ny = dy / dist;
-        if (!a.pinned) { a.x -= nx * overlap; a.y -= ny * overlap; }
-        if (!b.pinned) { b.x += nx * overlap; b.y += ny * overlap; }
+  // 3. Collision via spatial grid (O(n) amortized instead of O(n²))
+  const collisionCell = 40;
+  _gridClear(collisionCell);
+  for (const n of visibleNodes) _gridInsert(n);
+
+  for (const n of visibleNodes) {
+    const nkeys = _gridNeighborKeys(n.x, n.y);
+    for (const key of nkeys) {
+      const bucket = _grid.cells.get(key);
+      if (!bucket) continue;
+      for (const m of bucket) {
+        if (m.id <= n.id) continue;
+        const dx = m.x - n.x;
+        const dy = m.y - n.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 0.5;
+        const minDist = n.radius + m.radius + 2;
+        if (dist < minDist) {
+          const overlap = (minDist - dist) * 0.5;
+          const nx2 = dx / dist;
+          const ny2 = dy / dist;
+          if (!n.pinned) { n.x -= nx2 * overlap; n.y -= ny2 * overlap; }
+          if (!m.pinned) { m.x += nx2 * overlap; m.y += ny2 * overlap; }
+        }
       }
     }
   }
@@ -736,7 +786,19 @@ function renderGraph() {
     const scale = isActive ? 1.35 : (isConnected && activeNode ? 1.1 : 1.0);
     ctx.fillStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},${bodyAlpha})`;
     ctx.beginPath();
-    ctx.arc(n.x, n.y, screenR * scale, 0, Math.PI * 2);
+    if (n.kind === 'package') {
+      // Draw hexagon for package nodes
+      const hr = screenR * scale;
+      for (let i = 0; i < 6; i++) {
+        const angle = Math.PI / 6 + (Math.PI * 2 * i) / 6;
+        const px = n.x + Math.cos(angle) * hr;
+        const py = n.y + Math.sin(angle) * hr;
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+    } else {
+      ctx.arc(n.x, n.y, screenR * scale, 0, Math.PI * 2);
+    }
     ctx.fill();
 
     // White ring on active/selected
