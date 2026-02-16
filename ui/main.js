@@ -422,7 +422,7 @@ function initGraph(data) {
       : `${e.target.id}|${e.source.id}`;
     const samePkg = e.source.package && e.source.package === e.target.package;
     const multiEdge = Math.min(pairCount.get(pairKey) || 1, 4); // cap at 4
-    e.weight = (samePkg ? 1.5 : 1.0) + (multiEdge - 1) * 0.3;
+    e.weight = (samePkg ? 1.1 : 1.0) + (multiEdge - 1) * 0.3;
     e.samePkg = samePkg;
   }
 
@@ -666,7 +666,7 @@ function tickSimulation(dt) {
 
   // 2. Weighted link spring force
   const linkDistBase = 80;
-  const linkDistSamePkg = 45;
+  const linkDistSamePkg = 70;
   const linkStrength = 0.15;
   for (const e of edges) {
     if (!visibleSet.has(e.source.id) || !visibleSet.has(e.target.id)) continue;
@@ -710,7 +710,7 @@ function tickSimulation(dt) {
   }
 
   // 4. Package clustering (gentle pull toward affinity-placed centers)
-  const clusterStr = 0.07;
+  const clusterStr = 0.04;
   for (const n of visibleNodes) {
     if (n.pinned) continue;
     const c = pkgCenters.get(n.package);
