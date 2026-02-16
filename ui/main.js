@@ -1169,18 +1169,16 @@ window.graphFitToScreen = graphFitToScreen;
 
 // === FILTERS ===
 function setupFilters(packages, nodes) {
-  const disabledKinds = new Set(['package']); // disabled by default
   const kinds = [...new Set(nodes.map(n => n.kind))].sort();
-  $kindFilters.innerHTML = kinds.map(k => {
-    const isActive = !disabledKinds.has(k);
-    return `<button class="filter-chip${isActive ? ' active' : ''}" data-kind="${k}" onclick="toggleKindFilter(this)">` +
+  $kindFilters.innerHTML = kinds.map(k =>
+    `<button class="filter-chip active" data-kind="${k}" onclick="toggleKindFilter(this)">` +
     `<span class="chip-dot" style="background:${KIND_COLORS[k] || '#8b949e'}"></span>` +
-    `${KIND_LABELS[k] || k}</button>`;
-  }).join('');
+    `${KIND_LABELS[k] || k}</button>`
+  ).join('');
 
-  // Package chips (all active by default)
+  // Package chips (all INACTIVE by default — user opts in per-package)
   $packageFilters.innerHTML = packages.map(p =>
-    `<button class="filter-chip pkg-chip active" data-pkg="${escapeHtml(p)}" onclick="togglePkgFilter(this)">` +
+    `<button class="filter-chip pkg-chip" data-pkg="${escapeHtml(p)}" onclick="togglePkgFilter(this)">` +
     `${escapeHtml(p)}</button>`
   ).join('');
 }
