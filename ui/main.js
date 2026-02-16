@@ -904,10 +904,12 @@ function renderGraph() {
     }
   }
 
-  // --- 4. Labels (world-space sizing: shrink when zoomed out, grow when zoomed in) ---
-  const worldFontSize = 11;           // fixed in world coords — scales naturally with zoom
-  const screenPx = worldFontSize * k; // effective size on screen
-  const showAllLabels = screenPx > 6; // hide ambient labels when they'd be too tiny
+  // --- 4. Labels (partial zoom scaling) ---
+  // World-space font = 10 / k^0.75  →  screen size = 10 * k^0.25
+  // Labels shrink in world-space when zoomed out (less overlap)
+  // but only grow slowly on screen when zoomed in (~10px@k=1, ~13px@k=3, ~16px@k=6)
+  const baseFontWorld = 10 / Math.pow(k, 0.75);
+  const showAllLabels = k >= 3;       // only show ambient labels when zoomed in well past default
 
   ctx.textAlign = 'center';
 
@@ -924,8 +926,8 @@ function renderGraph() {
 
     // Active/connected labels get a floor so they stay readable even when zoomed out
     const fontSize = (isActive || isConnected)
-      ? Math.max(worldFontSize, 9 / k)
-      : worldFontSize;
+      ? Math.max(baseFontWorld, 9 / k)
+      : baseFontWorld;
     ctx.font = `500 ${fontSize}px "JetBrains Mono", monospace`;
 
     const color = KIND_COLORS[n.kind] || '#8b949e';
