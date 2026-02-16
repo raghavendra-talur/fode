@@ -237,6 +237,149 @@ pub fn get_entity_focus(entity_id: String, state: State<AppState>) -> Result<Foc
     })
 }
 
+// === Graph visualization data (lightweight, no source code) ===
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GraphNode {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub package: String,
+    pub file: String,
+    pub line: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GraphEdge {
+    pub source: String,
+    pub target: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PackageInfo {
+    pub name: String,
+    pub dir: String,
+    pub full_path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GraphData {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+    pub packages: Vec<String>,
+    pub package_info: Vec<PackageInfo>,
+}
+
+#[tauri::command]
+pub fn get_graph_data(state: State<AppState>) -> Result<GraphData, String> {
+    let graph = state.entity_graph.lock().unwrap();
+    let graph = graph.as_ref().ok_or("No repo loaded")?;
+
+    let mut nodes: Vec<GraphNode> = graph
+        .entities
+        .iter()
+        .map(|e| GraphNode {
+            id: e.id.clone(),
+            name: e.name.clone(),
+            kind: e.kind.label().to_string(),
+            package: e.package.clone(),
+            file: e.file.clone(),
+            line: e.line,
+        })
+        .collect();
+
+    // Collect unique packages and their directory paths
+    let mut pkg_dir_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for e in &graph.entities {
+        if !e.package.is_empty() {
+            pkg_dir_map.entry(e.package.clone()).or_insert_with(|| {
+                // Derive dir from entity file path
+                std::path::Path::new(&e.file)
+                    .parent()
+                    .and_then(|p| p.to_str())
+                    .unwrap_or(".")
+                    .to_string()
+            });
+        }
+    }
+    let mut packages: Vec<String> = pkg_dir_map.keys().cloned().collect();
+    packages.sort();
+
+    // Add a Package node for each unique package
+    for pkg in &packages {
+        nodes.push(GraphNode {
+            id: format!("pkg::{}", pkg),
+            name: pkg.clone(),
+            kind: "package".to_string(),
+            package: pkg.clone(),
+            file: String::new(),
+            line: 0,
+        });
+    }
+
+    // Build a set of valid node IDs (entities + package nodes)
+    let valid_ids: std::collections::HashSet<&str> =
+        nodes.iter().map(|n| n.id.as_str()).collect();
+
+    let mut edges: Vec<GraphEdge> = graph
+        .relations
+        .iter()
+        .filter(|r| valid_ids.contains(r.from_id.as_str()) && valid_ids.contains(r.to_id.as_str()))
+        .map(|r| GraphEdge {
+            source: r.from_id.clone(),
+            target: r.to_id.clone(),
+            kind: format!("{:?}", r.kind),
+        })
+        .collect();
+
+    // Add Contains edges from package nodes to their member entities
+    for e in &graph.entities {
+        if !e.package.is_empty() {
+            edges.push(GraphEdge {
+                source: format!("pkg::{}", e.package),
+                target: e.id.clone(),
+                kind: "Contains".to_string(),
+            });
+        }
+    }
+
+    // Build package_info with full paths (module + dir)
+    let module_name = state
+        .repo_info
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|info| info.module_name.clone())
+        .unwrap_or_default();
+
+    let package_info: Vec<PackageInfo> = packages
+        .iter()
+        .map(|pkg| {
+            let dir = pkg_dir_map.get(pkg).cloned().unwrap_or_else(|| ".".to_string());
+            let full_path = if module_name.is_empty() {
+                dir.clone()
+            } else if dir == "." {
+                module_name.clone()
+            } else {
+                format!("{}/{}", module_name, dir)
+            };
+            PackageInfo {
+                name: pkg.clone(),
+                dir,
+                full_path,
+            }
+        })
+        .collect();
+
+    Ok(GraphData {
+        nodes,
+        edges,
+        packages,
+        package_info,
+    })
+}
+
 #[tauri::command]
 pub fn get_all_entities(state: State<AppState>) -> Result<Vec<Entity>, String> {
     let graph = state.entity_graph.lock().unwrap();

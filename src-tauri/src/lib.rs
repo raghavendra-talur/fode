@@ -21,6 +21,7 @@ pub fn run() {
             commands::get_entity_focus,
             commands::get_all_entities,
             commands::get_entity_source,
+            commands::get_graph_data,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

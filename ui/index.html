@@ -51,9 +51,44 @@
         <div id="related-outgoing" class="related-column outgoing"></div>
       </div>
 
+      <!-- View toggle + filters (between search and content) -->
+      <div id="view-controls" class="hidden">
+        <div class="view-toggle">
+          <button id="btn-grid-view" class="view-toggle-btn active" onclick="switchToGrid()">Grid</button>
+          <button id="btn-graph-view" class="view-toggle-btn" onclick="switchToGraph()">Graph</button>
+        </div>
+        <div id="graph-filters" class="graph-filters hidden">
+          <div class="filter-group">
+            <span class="filter-label">Filter</span>
+            <div id="kind-filters" class="filter-chips"></div>
+            <span class="filter-divider"></span>
+            <div id="package-dropdown" class="pkg-dropdown">
+              <button id="pkg-dropdown-btn" class="pkg-dropdown-btn" onclick="togglePkgDropdown()">
+                Packages <span id="pkg-dropdown-count" class="pkg-dropdown-count">0</span>
+              </button>
+              <div id="pkg-dropdown-menu" class="pkg-dropdown-menu hidden">
+                <div id="pkg-dropdown-list" class="pkg-dropdown-list"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Browse all entities (shown when no entity is focused) -->
       <div id="browse-container">
         <div id="entity-grid" class="entity-grid"></div>
+      </div>
+
+      <!-- Graph visualization -->
+      <div id="graph-container" class="hidden">
+        <canvas id="graph-canvas"></canvas>
+        <div id="graph-tooltip" class="graph-tooltip hidden"></div>
+        <div id="graph-zoom-toolbar" class="graph-zoom-toolbar">
+          <button class="zoom-btn" onclick="graphZoomIn()" title="Zoom in">+</button>
+          <button class="zoom-btn" onclick="graphZoomOut()" title="Zoom out">&minus;</button>
+          <button class="zoom-btn zoom-btn-fit" onclick="graphFitToScreen()" title="Fit to screen">&#x2922;</button>
+          <button class="zoom-btn" onclick="graphRedraw()" title="Redraw graph">&#x21bb;</button>
+        </div>
       </div>
     </div>
   </div>
