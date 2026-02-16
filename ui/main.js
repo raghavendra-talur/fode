@@ -401,15 +401,29 @@ function initGraph(data) {
   const edges = [];
   const adjOut = new Map(); // id -> Set<id>
   const adjIn  = new Map(); // id -> Set<id>
+  // Count edges per node-pair for multi-relation weighting
+  const pairCount = new Map(); // "src|tgt" -> count
   for (const e of data.edges) {
     const s = nodeMap.get(e.source);
     const t = nodeMap.get(e.target);
     if (!s || !t) continue;
-    edges.push({ source: s, target: t, kind: e.kind });
+    const pairKey = s.id < t.id ? `${s.id}|${t.id}` : `${t.id}|${s.id}`;
+    pairCount.set(pairKey, (pairCount.get(pairKey) || 0) + 1);
+    edges.push({ source: s, target: t, kind: e.kind, weight: 1 });
     if (!adjOut.has(s.id)) adjOut.set(s.id, new Set());
     adjOut.get(s.id).add(t.id);
     if (!adjIn.has(t.id)) adjIn.set(t.id, new Set());
     adjIn.get(t.id).add(s.id);
+  }
+  // Assign edge weights: same-package bonus + multi-edge bonus
+  for (const e of edges) {
+    const pairKey = e.source.id < e.target.id
+      ? `${e.source.id}|${e.target.id}`
+      : `${e.target.id}|${e.source.id}`;
+    const samePkg = e.source.package && e.source.package === e.target.package;
+    const multiEdge = Math.min(pairCount.get(pairKey) || 1, 4); // cap at 4
+    e.weight = (samePkg ? 1.5 : 1.0) + (multiEdge - 1) * 0.3;
+    e.samePkg = samePkg;
   }
 
   // Degree & radius
@@ -427,17 +441,70 @@ function initGraph(data) {
     }
   });
 
-  // --- Package clustering: initial placement ---
+  // --- Package clustering: affinity-based initial placement ---
   const pkgSet = [...new Set(nodes.map(n => n.package))];
   const pkgCenters = new Map();
-  const clusterRadius = Math.min(width, height) * 0.32;
-  pkgSet.forEach((pkg, i) => {
+
+  // Build inter-package affinity (count cross-package edges)
+  const pkgAffinity = new Map(); // "pkgA|pkgB" -> count
+  for (const e of edges) {
+    const pA = e.source.package, pB = e.target.package;
+    if (!pA || !pB || pA === pB) continue;
+    const key = pA < pB ? `${pA}|${pB}` : `${pB}|${pA}`;
+    pkgAffinity.set(key, (pkgAffinity.get(key) || 0) + 1);
+  }
+
+  // Mini force-directed placement for package centers
+  const pkgNodes = pkgSet.map((pkg, i) => {
     const angle = (2 * Math.PI * i) / pkgSet.length;
-    pkgCenters.set(pkg, {
-      x: width / 2 + Math.cos(angle) * clusterRadius,
-      y: height / 2 + Math.sin(angle) * clusterRadius,
-    });
+    const r = Math.min(width, height) * 0.32;
+    return { id: pkg, x: width / 2 + Math.cos(angle) * r, y: height / 2 + Math.sin(angle) * r };
   });
+  const pkgIdx = new Map();
+  pkgNodes.forEach((p, i) => pkgIdx.set(p.id, i));
+
+  // Run 80 iterations of a simple package-level simulation
+  for (let iter = 0; iter < 80; iter++) {
+    const alpha = 1.0 - iter / 80;
+    // Repulsion between all package centers
+    for (let i = 0; i < pkgNodes.length; i++) {
+      for (let j = i + 1; j < pkgNodes.length; j++) {
+        const a = pkgNodes[i], b = pkgNodes[j];
+        let dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const force = -8000 * alpha / (dist * dist);
+        const fx = (dx / dist) * force, fy = (dy / dist) * force;
+        a.x -= fx; a.y -= fy;
+        b.x += fx; b.y += fy;
+      }
+    }
+    // Attraction between packages with cross-edges (proportional to affinity)
+    for (const [key, count] of pkgAffinity) {
+      const [pA, pB] = key.split('|');
+      const iA = pkgIdx.get(pA), iB = pkgIdx.get(pB);
+      if (iA === undefined || iB === undefined) continue;
+      const a = pkgNodes[iA], b = pkgNodes[iB];
+      let dx = b.x - a.x, dy = b.y - a.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const targetDist = 150;
+      const strength = Math.min(count, 20) * 0.008 * alpha;
+      const displacement = dist - targetDist;
+      const fx = (dx / dist) * displacement * strength;
+      const fy = (dy / dist) * displacement * strength;
+      a.x += fx; a.y += fy;
+      b.x -= fx; b.y -= fy;
+    }
+    // Center gravity for package centers
+    for (const p of pkgNodes) {
+      p.x += (width / 2 - p.x) * 0.03 * alpha;
+      p.y += (height / 2 - p.y) * 0.03 * alpha;
+    }
+  }
+
+  for (const p of pkgNodes) {
+    pkgCenters.set(p.id, { x: p.x, y: p.y });
+  }
+
   nodes.forEach(n => {
     const c = pkgCenters.get(n.package);
     if (c) {
@@ -569,7 +636,7 @@ function tickSimulation(dt) {
   const N = visibleNodes.length;
 
   // 1. Many-body repulsion via spatial grid (O(n) amortized instead of O(n²))
-  const repulsion = -200;
+  const repulsion = -250;
   const cutoff = N > 800 ? 250 : 500;
   const cutoffSq = cutoff * cutoff;
   _gridClear(cutoff);
@@ -597,16 +664,18 @@ function tickSimulation(dt) {
     }
   }
 
-  // 2. Link spring force
-  const linkDist = 80;
-  const linkStrength = 0.08;
+  // 2. Weighted link spring force
+  const linkDistBase = 80;
+  const linkDistSamePkg = 45;
+  const linkStrength = 0.15;
   for (const e of edges) {
     if (!visibleSet.has(e.source.id) || !visibleSet.has(e.target.id)) continue;
     let dx = e.target.x - e.source.x;
     let dy = e.target.y - e.source.y;
     const dist = Math.sqrt(dx * dx + dy * dy) || 0.5;
-    const displacement = dist - linkDist;
-    const strength = displacement * linkStrength * alpha;
+    const targetDist = e.samePkg ? linkDistSamePkg : linkDistBase;
+    const displacement = dist - targetDist;
+    const strength = displacement * linkStrength * (e.weight || 1) * alpha;
     const fx = (dx / dist) * strength;
     const fy = (dy / dist) * strength;
     if (!e.source.pinned) { e.source.vx += fx; e.source.vy += fy; }
@@ -640,8 +709,8 @@ function tickSimulation(dt) {
     }
   }
 
-  // 4. Package clustering (gentle)
-  const clusterStr = 0.06;
+  // 4. Package clustering (gentle pull toward affinity-placed centers)
+  const clusterStr = 0.07;
   for (const n of visibleNodes) {
     if (n.pinned) continue;
     const c = pkgCenters.get(n.package);
