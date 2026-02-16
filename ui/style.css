@@ -34,8 +34,9 @@ body {
   font-family: var(--font-sans);
   background: var(--bg);
   color: var(--text);
-  overflow-x: hidden;
-  min-height: 100vh;
+  overflow: hidden;
+  height: 100vh;
+  margin: 0;
 }
 
 /* === Views === */
@@ -97,7 +98,8 @@ body {
 #main {
   flex-direction: column;
   width: 100vw;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 
 /* === Header === */
