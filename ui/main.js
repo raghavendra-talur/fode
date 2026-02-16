@@ -362,6 +362,12 @@ async function loadGraphView() {
   }
 }
 
+function graphRedraw() {
+  graphState = null;
+  loadGraphView();
+}
+window.graphRedraw = graphRedraw;
+
 function initGraph(data) {
   const canvas = $graphCanvas;
   const rect = $graphContainer.getBoundingClientRect();
