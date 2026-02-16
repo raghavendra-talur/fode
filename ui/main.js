@@ -445,6 +445,17 @@ function initGraph(data) {
   setupFilters(data.packages, nodes);
   renderLegend(nodes);
 
+  // Apply initial filter state (some kinds may be disabled by default)
+  {
+    const activeKinds = new Set();
+    $kindFilters.querySelectorAll('.filter-chip.active').forEach(c => activeKinds.add(c.dataset.kind));
+    const activePkgs = new Set();
+    $packageFilters.querySelectorAll('.filter-chip.active').forEach(c => activePkgs.add(c.dataset.pkg));
+    nodes.forEach(n => {
+      n.visible = activeKinds.has(n.kind) && activePkgs.has(n.package);
+    });
+  }
+
   // --- Graph state ---
   graphState = {
     nodes, edges, nodeMap, adjOut, adjIn,
@@ -861,6 +872,46 @@ function renderGraph() {
     ctx.fillText(n.name, n.x, labelY);
   }
 
+  // --- 5. Debug info overlay (screen-space) ---
+  ctx.restore();
+  ctx.save();
+  const dpr2 = window.devicePixelRatio;
+  ctx.setTransform(dpr2, 0, 0, dpr2, 0, 0);
+  {
+    let visCount = 0, hidCount = 0, pkgCount = 0;
+    for (const n of nodes) {
+      if (n.visible) { visCount++; if (n.kind === 'package') pkgCount++; }
+      else hidCount++;
+    }
+    let visEdges = 0;
+    for (const e of edges) {
+      if (e.source.visible && e.target.visible) visEdges++;
+    }
+    const lines = [
+      `nodes: ${visCount} visible / ${nodes.length} total`,
+      `edges: ${visEdges} visible / ${edges.length} total`,
+      `packages: ${pkgCount} visible`,
+      `alpha: ${graphState.alpha.toFixed(3)}`,
+      `zoom: ${transform.k.toFixed(2)}`,
+    ];
+    const lh = 14;
+    const pad = 8;
+    const x0 = width - pad;
+    const y0 = height - pad - lines.length * lh;
+    ctx.font = '11px "JetBrains Mono", monospace';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'top';
+    // Background
+    const maxW = Math.max(...lines.map(l => ctx.measureText(l).width));
+    ctx.fillStyle = 'rgba(13,17,23,0.7)';
+    roundRect(ctx, x0 - maxW - pad, y0 - 4, maxW + pad * 2, lines.length * lh + 8, 4);
+    ctx.fill();
+    // Text
+    ctx.fillStyle = 'rgba(140,150,165,0.9)';
+    for (let i = 0; i < lines.length; i++) {
+      ctx.fillText(lines[i], x0, y0 + i * lh);
+    }
+  }
   ctx.restore();
 }
 
@@ -1118,12 +1169,14 @@ window.graphFitToScreen = graphFitToScreen;
 
 // === FILTERS ===
 function setupFilters(packages, nodes) {
+  const disabledKinds = new Set(['package']); // disabled by default
   const kinds = [...new Set(nodes.map(n => n.kind))].sort();
-  $kindFilters.innerHTML = kinds.map(k =>
-    `<button class="filter-chip active" data-kind="${k}" onclick="toggleKindFilter(this)">` +
+  $kindFilters.innerHTML = kinds.map(k => {
+    const isActive = !disabledKinds.has(k);
+    return `<button class="filter-chip${isActive ? ' active' : ''}" data-kind="${k}" onclick="toggleKindFilter(this)">` +
     `<span class="chip-dot" style="background:${KIND_COLORS[k] || '#8b949e'}"></span>` +
-    `${KIND_LABELS[k] || k}</button>`
-  ).join('');
+    `${KIND_LABELS[k] || k}</button>`;
+  }).join('');
 
   // Package chips (all active by default)
   $packageFilters.innerHTML = packages.map(p =>
