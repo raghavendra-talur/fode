@@ -62,7 +62,14 @@
             <span class="filter-label">Filter</span>
             <div id="kind-filters" class="filter-chips"></div>
             <span class="filter-divider"></span>
-            <div id="package-filters" class="filter-chips"></div>
+            <div id="package-dropdown" class="pkg-dropdown">
+              <button id="pkg-dropdown-btn" class="pkg-dropdown-btn" onclick="togglePkgDropdown()">
+                Packages <span id="pkg-dropdown-count" class="pkg-dropdown-count">0</span>
+              </button>
+              <div id="pkg-dropdown-menu" class="pkg-dropdown-menu hidden">
+                <div id="pkg-dropdown-list" class="pkg-dropdown-list"></div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -82,7 +89,6 @@
           <button class="zoom-btn zoom-btn-fit" onclick="graphFitToScreen()" title="Fit to screen">&#x2922;</button>
           <button class="zoom-btn" onclick="graphRedraw()" title="Redraw graph">&#x21bb;</button>
         </div>
-        <div id="graph-legend" class="graph-legend"></div>
       </div>
     </div>
   </div>

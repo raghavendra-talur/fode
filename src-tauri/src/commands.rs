@@ -257,10 +257,18 @@ pub struct GraphEdge {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct PackageInfo {
+    pub name: String,
+    pub dir: String,
+    pub full_path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct GraphData {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
     pub packages: Vec<String>,
+    pub package_info: Vec<PackageInfo>,
 }
 
 #[tauri::command]
@@ -281,14 +289,21 @@ pub fn get_graph_data(state: State<AppState>) -> Result<GraphData, String> {
         })
         .collect();
 
-    // Collect unique packages and create package nodes + Contains edges
-    let mut pkg_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Collect unique packages and their directory paths
+    let mut pkg_dir_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for e in &graph.entities {
         if !e.package.is_empty() {
-            pkg_set.insert(e.package.clone());
+            pkg_dir_map.entry(e.package.clone()).or_insert_with(|| {
+                // Derive dir from entity file path
+                std::path::Path::new(&e.file)
+                    .parent()
+                    .and_then(|p| p.to_str())
+                    .unwrap_or(".")
+                    .to_string()
+            });
         }
     }
-    let mut packages: Vec<String> = pkg_set.into_iter().collect();
+    let mut packages: Vec<String> = pkg_dir_map.keys().cloned().collect();
     packages.sort();
 
     // Add a Package node for each unique package
@@ -329,10 +344,39 @@ pub fn get_graph_data(state: State<AppState>) -> Result<GraphData, String> {
         }
     }
 
+    // Build package_info with full paths (module + dir)
+    let module_name = state
+        .repo_info
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|info| info.module_name.clone())
+        .unwrap_or_default();
+
+    let package_info: Vec<PackageInfo> = packages
+        .iter()
+        .map(|pkg| {
+            let dir = pkg_dir_map.get(pkg).cloned().unwrap_or_else(|| ".".to_string());
+            let full_path = if module_name.is_empty() {
+                dir.clone()
+            } else if dir == "." {
+                module_name.clone()
+            } else {
+                format!("{}/{}", module_name, dir)
+            };
+            PackageInfo {
+                name: pkg.clone(),
+                dir,
+                full_path,
+            }
+        })
+        .collect();
+
     Ok(GraphData {
         nodes,
         edges,
         packages,
+        package_info,
     })
 }
 

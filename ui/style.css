@@ -638,11 +638,94 @@ body {
   margin: 0 0.2rem;
 }
 
-.filter-chip.pkg-chip {
-  text-transform: none;
-  font-weight: 500;
-  font-size: 0.72rem;
-  letter-spacing: 0;
+/* === Package Dropdown === */
+.pkg-dropdown {
+  position: relative;
+}
+
+.pkg-dropdown-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.7rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+
+.pkg-dropdown-btn:hover {
+  border-color: var(--text-dim);
+  color: var(--text);
+}
+
+.pkg-dropdown-count {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.65rem;
+  font-weight: 700;
+}
+
+.pkg-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 320px;
+  max-height: 300px;
+  overflow-y: auto;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  z-index: 100;
+  padding: 0.25rem 0;
+}
+
+.pkg-dropdown-menu.hidden {
+  display: none;
+}
+
+.pkg-dropdown-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.pkg-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.75rem;
+  cursor: pointer;
+  transition: background 0.1s;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.pkg-dropdown-item:hover {
+  background: var(--bg-card-hover);
+  color: var(--text);
+}
+
+.pkg-dropdown-item input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.pkg-dropdown-path {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* === Graph Container === */
@@ -748,34 +831,6 @@ body {
   font-size: 1rem;
 }
 
-.graph-legend {
-  position: absolute;
-  bottom: 12px;
-  right: 12px;
-  display: flex;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-  background: rgba(13, 17, 23, 0.85);
-  padding: 0.5rem 0.75rem;
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
-}
-
-.legend-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  font-size: 0.7rem;
-  color: var(--text-muted);
-  font-family: var(--font-mono);
-}
-
-.legend-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  display: inline-block;
-}
 
 /* === Scrollbar === */
 ::-webkit-scrollbar {

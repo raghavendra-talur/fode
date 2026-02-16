@@ -25,10 +25,12 @@ const $btnGraphView = document.getElementById('btn-graph-view');
 const $graphContainer = document.getElementById('graph-container');
 const $graphCanvas = document.getElementById('graph-canvas');
 const $graphTooltip = document.getElementById('graph-tooltip');
-const $graphLegend = document.getElementById('graph-legend');
 const $graphFilters = document.getElementById('graph-filters');
 const $kindFilters = document.getElementById('kind-filters');
-const $packageFilters = document.getElementById('package-filters');
+const $pkgDropdownBtn = document.getElementById('pkg-dropdown-btn');
+const $pkgDropdownCount = document.getElementById('pkg-dropdown-count');
+const $pkgDropdownMenu = document.getElementById('pkg-dropdown-menu');
+const $pkgDropdownList = document.getElementById('pkg-dropdown-list');
 
 // === State ===
 let repoInfo = null;
@@ -447,16 +449,15 @@ function initGraph(data) {
     }
   });
 
-  // --- Filters & legend ---
-  setupFilters(data.packages, nodes);
-  renderLegend(nodes);
+  // --- Filters ---
+  setupFilters(data.package_info || data.packages.map(p => ({ name: p, dir: p, full_path: p })), nodes);
 
   // Apply initial filter state (some kinds may be disabled by default)
   {
     const activeKinds = new Set();
     $kindFilters.querySelectorAll('.filter-chip.active').forEach(c => activeKinds.add(c.dataset.kind));
     const activePkgs = new Set();
-    $packageFilters.querySelectorAll('.filter-chip.active').forEach(c => activePkgs.add(c.dataset.pkg));
+    $pkgDropdownList.querySelectorAll('input[type="checkbox"]:checked').forEach(c => activePkgs.add(c.dataset.pkg));
     nodes.forEach(n => {
       n.visible = activeKinds.has(n.kind) && activePkgs.has(n.package);
     });
@@ -1174,19 +1175,22 @@ function graphFitToScreen() {
 window.graphFitToScreen = graphFitToScreen;
 
 // === FILTERS ===
-function setupFilters(packages, nodes) {
+function setupFilters(packageInfo, nodes) {
   const kinds = [...new Set(nodes.map(n => n.kind))].sort();
   $kindFilters.innerHTML = kinds.map(k =>
     `<button class="filter-chip active" data-kind="${k}" onclick="toggleKindFilter(this)">` +
     `<span class="chip-dot" style="background:${KIND_COLORS[k] || '#8b949e'}"></span>` +
-    `${KIND_LABELS[k] || k}</button>`
+    `${k}</button>`
   ).join('');
 
-  // Package chips (all INACTIVE by default — user opts in per-package)
-  $packageFilters.innerHTML = packages.map(p =>
-    `<button class="filter-chip pkg-chip" data-pkg="${escapeHtml(p)}" onclick="togglePkgFilter(this)">` +
-    `${escapeHtml(p)}</button>`
+  // Package dropdown checkboxes (all UNCHECKED by default — user opts in)
+  $pkgDropdownList.innerHTML = packageInfo.map(p =>
+    `<label class="pkg-dropdown-item">` +
+    `<input type="checkbox" data-pkg="${escapeHtml(p.name)}" onchange="applyFilters()">` +
+    `<span class="pkg-dropdown-path">${escapeHtml(p.full_path)}</span>` +
+    `</label>`
   ).join('');
+  updatePkgCount();
 }
 
 function toggleKindFilter(btn) {
@@ -1195,11 +1199,23 @@ function toggleKindFilter(btn) {
 }
 window.toggleKindFilter = toggleKindFilter;
 
-function togglePkgFilter(btn) {
-  btn.classList.toggle('active');
-  applyFilters();
+function togglePkgDropdown() {
+  $pkgDropdownMenu.classList.toggle('hidden');
 }
-window.togglePkgFilter = togglePkgFilter;
+window.togglePkgDropdown = togglePkgDropdown;
+
+// Close dropdown when clicking outside
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#package-dropdown')) {
+    $pkgDropdownMenu.classList.add('hidden');
+  }
+});
+
+function updatePkgCount() {
+  const checked = $pkgDropdownList.querySelectorAll('input[type="checkbox"]:checked').length;
+  const total = $pkgDropdownList.querySelectorAll('input[type="checkbox"]').length;
+  $pkgDropdownCount.textContent = `${checked}/${total}`;
+}
 
 function applyFilters() {
   if (!graphState) return;
@@ -1208,22 +1224,16 @@ function applyFilters() {
   $kindFilters.querySelectorAll('.filter-chip.active').forEach(c => activeKinds.add(c.dataset.kind));
 
   const activePkgs = new Set();
-  $packageFilters.querySelectorAll('.filter-chip.active').forEach(c => activePkgs.add(c.dataset.pkg));
+  $pkgDropdownList.querySelectorAll('input[type="checkbox"]:checked').forEach(c => activePkgs.add(c.dataset.pkg));
 
   graphState.nodes.forEach(n => {
     n.visible = activeKinds.has(n.kind) && activePkgs.has(n.package);
   });
 
+  updatePkgCount();
   reheat(0.5);
 }
 
-function renderLegend(nodes) {
-  const kinds = [...new Set(nodes.map(n => n.kind))].sort();
-  $graphLegend.innerHTML = kinds.map(k =>
-    `<span class="legend-item">` +
-    `<span class="legend-dot" style="background:${KIND_COLORS[k] || '#8b949e'}"></span>${k}</span>`
-  ).join('');
-}
 
 // === Resize ===
 window.addEventListener('resize', () => {
