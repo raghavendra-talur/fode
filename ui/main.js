@@ -904,10 +904,11 @@ function renderGraph() {
     }
   }
 
-  // --- 4. Labels ---
-  const showAllLabels = k > 0.8;
-  const fontSize = Math.max(8, Math.min(12, 10 / k));
-  ctx.font = `500 ${fontSize}px "JetBrains Mono", monospace`;
+  // --- 4. Labels (world-space sizing: shrink when zoomed out, grow when zoomed in) ---
+  const worldFontSize = 11;           // fixed in world coords — scales naturally with zoom
+  const screenPx = worldFontSize * k; // effective size on screen
+  const showAllLabels = screenPx > 6; // hide ambient labels when they'd be too tiny
+
   ctx.textAlign = 'center';
 
   for (const n of nodes) {
@@ -920,6 +921,12 @@ function renderGraph() {
     // Show labels when: active/connected, or zoomed in enough with enough highlight
     const shouldShow = isActive || (isConnected && activeNode) || (showAllLabels && ha > 0.5);
     if (!shouldShow) continue;
+
+    // Active/connected labels get a floor so they stay readable even when zoomed out
+    const fontSize = (isActive || isConnected)
+      ? Math.max(worldFontSize, 9 / k)
+      : worldFontSize;
+    ctx.font = `500 ${fontSize}px "JetBrains Mono", monospace`;
 
     const color = KIND_COLORS[n.kind] || '#8b949e';
     const labelY = n.y + n.radius + fontSize * 0.6 + 2;
