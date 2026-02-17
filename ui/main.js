@@ -844,10 +844,10 @@ function renderGraph() {
     if (!inViewport(eMidX, eMidY, eHalfLen + 20)) continue;
 
     const avgAlpha = (e.source.highlightAlpha + e.target.highlightAlpha) / 2;
-    const edgeAlpha = activeNode ? avgAlpha * 0.2 + 0.03 : 0.12;
+    const edgeAlpha = activeNode ? avgAlpha * 0.35 + 0.05 : 0.32;
 
     ctx.strokeStyle = `rgba(136,152,170,${edgeAlpha})`;
-    ctx.lineWidth = 0.6 / k;
+    ctx.lineWidth = (0.5 + (e.weight - 1) * 0.9) / k;
 
     // Curved edge (quadratic bezier with stable per-pair offset)
     const dx = e.target.x - e.source.x;
@@ -886,8 +886,8 @@ function renderGraph() {
       const cpx = (e.source.x + e.target.x) / 2 + nx * curvature;
       const cpy = (e.source.y + e.target.y) / 2 + ny * curvature;
 
-      ctx.strokeStyle = hexToRgba(color, 0.45);
-      ctx.lineWidth = 1.2 / k;
+      ctx.strokeStyle = hexToRgba(color, 0.7);
+      ctx.lineWidth = (1.0 + (e.weight - 1) * 1.5) / k;
       ctx.beginPath();
       ctx.moveTo(e.source.x, e.source.y);
       ctx.quadraticCurveTo(cpx, cpy, e.target.x, e.target.y);
@@ -898,7 +898,7 @@ function renderGraph() {
       const arrowSize = 6 / k;
       const endX = e.target.x - Math.cos(arrowAngle) * (e.target.radius + 2);
       const endY = e.target.y - Math.sin(arrowAngle) * (e.target.radius + 2);
-      ctx.fillStyle = hexToRgba(color, 0.55);
+      ctx.fillStyle = hexToRgba(color, 0.75);
       ctx.beginPath();
       ctx.moveTo(endX, endY);
       ctx.lineTo(endX - arrowSize * Math.cos(arrowAngle - Math.PI / 6),
