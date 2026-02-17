@@ -349,6 +349,16 @@ function hexToRgba(hex, alpha) {
   return `rgba(${r},${g},${b},${alpha})`;
 }
 
+// Stable pseudo-random curve offset for each edge pair (organic bezier curves)
+function edgeCurveOffset(sourceId, targetId) {
+  let hash = 0;
+  const key = sourceId < targetId ? sourceId + '|' + targetId : targetId + '|' + sourceId;
+  for (let i = 0; i < key.length; i++) {
+    hash = ((hash << 5) - hash + key.charCodeAt(i)) | 0;
+  }
+  return ((hash % 30) - 15);
+}
+
 // === Load / Init ===
 async function loadGraphView() {
   if (graphState && graphState.graphData) {
@@ -547,6 +557,9 @@ function initGraph(data) {
     alphaDecay: 0.02,
     alphaMin: 0.001,
     velocityDecay: 0.55, // lower = more damping, 0.4-0.6 feels organic
+
+    // Timing
+    startTime: performance.now(),
 
     // Interaction
     hoveredNode: null,
@@ -792,17 +805,29 @@ function renderGraph() {
   ctx.translate(transform.x, transform.y);
   ctx.scale(k, k);
 
+  // Viewport culling bounds (world coords)
+  const viewLeft = -transform.x / k;
+  const viewTop = -transform.y / k;
+  const viewRight = (width - transform.x) / k;
+  const viewBottom = (height - transform.y) / k;
+  const cullMargin = 60 / k;
+  function inViewport(x, y, r) {
+    return x + r + cullMargin > viewLeft && x - r - cullMargin < viewRight &&
+           y + r + cullMargin > viewTop && y - r - cullMargin < viewBottom;
+  }
+
   // Pre-build connected set for active node
   const connectedSet = new Set();
+  const highlightedEdges = [];
   if (activeNode) {
     connectedSet.add(activeNode.id);
     for (const e of edges) {
-      if (e.source.id === activeNode.id) connectedSet.add(e.target.id);
-      if (e.target.id === activeNode.id) connectedSet.add(e.source.id);
+      if (e.source.id === activeNode.id) { connectedSet.add(e.target.id); highlightedEdges.push(e); }
+      if (e.target.id === activeNode.id) { connectedSet.add(e.source.id); highlightedEdges.push(e); }
     }
   }
 
-  // --- 1. Draw edges (base layer) ---
+  // --- 1. Draw edges (base layer — curved bezier) ---
   ctx.lineCap = 'round';
   for (const e of edges) {
     if (!e.source.visible || !e.target.visible) continue;
@@ -810,41 +835,102 @@ function renderGraph() {
     const isHighlighted = activeNode && (
       e.source.id === activeNode.id || e.target.id === activeNode.id
     );
-
     if (isHighlighted) continue; // draw highlighted edges on top
+
+    // Viewport culling for edges
+    const eMidX = (e.source.x + e.target.x) / 2;
+    const eMidY = (e.source.y + e.target.y) / 2;
+    const eHalfLen = Math.sqrt((e.target.x - e.source.x) ** 2 + (e.target.y - e.source.y) ** 2) / 2;
+    if (!inViewport(eMidX, eMidY, eHalfLen + 20)) continue;
 
     const avgAlpha = (e.source.highlightAlpha + e.target.highlightAlpha) / 2;
     const edgeAlpha = activeNode ? avgAlpha * 0.2 + 0.03 : 0.12;
 
     ctx.strokeStyle = `rgba(136,152,170,${edgeAlpha})`;
     ctx.lineWidth = 0.6 / k;
+
+    // Curved edge (quadratic bezier with stable per-pair offset)
+    const dx = e.target.x - e.source.x;
+    const dy = e.target.y - e.source.y;
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+    const offset = edgeCurveOffset(e.source.id, e.target.id);
+    const curvature = offset * Math.min(dist / 200, 1);
+    const nx = -dy / dist, ny = dx / dist;
+    const cpx = eMidX + nx * curvature;
+    const cpy = eMidY + ny * curvature;
+
     ctx.beginPath();
     ctx.moveTo(e.source.x, e.source.y);
-    ctx.lineTo(e.target.x, e.target.y);
+    ctx.quadraticCurveTo(cpx, cpy, e.target.x, e.target.y);
     ctx.stroke();
   }
 
-  // --- 2. Draw highlighted edges ---
+  // --- 2. Draw highlighted edges (curved + directional arrows + labels) ---
   if (activeNode) {
-    for (const e of edges) {
-      if (!e.source.visible || !e.target.visible) continue;
-      if (e.source.id !== activeNode.id && e.target.id !== activeNode.id) continue;
+    const showEdgeLabels = highlightedEdges.length <= 15 && k >= 0.4;
 
-      // Use the color of the "other" end for variety
+    for (const e of highlightedEdges) {
+      if (!e.source.visible || !e.target.visible) continue;
+
       const other = e.source.id === activeNode.id ? e.target : e.source;
       const color = KIND_COLORS[other.kind] || '#8b949e';
+      const rgb = KIND_RGB[other.kind] || { r: 139, g: 148, b: 158 };
+
+      // Curved edge
+      const dx = e.target.x - e.source.x;
+      const dy = e.target.y - e.source.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const offset = edgeCurveOffset(e.source.id, e.target.id);
+      const curvature = offset * Math.min(dist / 200, 1);
+      const nx = -dy / dist, ny = dx / dist;
+      const cpx = (e.source.x + e.target.x) / 2 + nx * curvature;
+      const cpy = (e.source.y + e.target.y) / 2 + ny * curvature;
+
       ctx.strokeStyle = hexToRgba(color, 0.45);
       ctx.lineWidth = 1.2 / k;
       ctx.beginPath();
       ctx.moveTo(e.source.x, e.source.y);
-      ctx.lineTo(e.target.x, e.target.y);
+      ctx.quadraticCurveTo(cpx, cpy, e.target.x, e.target.y);
       ctx.stroke();
+
+      // Arrow head at target (tangent direction from control point to target)
+      const arrowAngle = Math.atan2(e.target.y - cpy, e.target.x - cpx);
+      const arrowSize = 6 / k;
+      const endX = e.target.x - Math.cos(arrowAngle) * (e.target.radius + 2);
+      const endY = e.target.y - Math.sin(arrowAngle) * (e.target.radius + 2);
+      ctx.fillStyle = hexToRgba(color, 0.55);
+      ctx.beginPath();
+      ctx.moveTo(endX, endY);
+      ctx.lineTo(endX - arrowSize * Math.cos(arrowAngle - Math.PI / 6),
+                 endY - arrowSize * Math.sin(arrowAngle - Math.PI / 6));
+      ctx.lineTo(endX - arrowSize * Math.cos(arrowAngle + Math.PI / 6),
+                 endY - arrowSize * Math.sin(arrowAngle + Math.PI / 6));
+      ctx.closePath();
+      ctx.fill();
+
+      // Edge relationship label at curve midpoint
+      if (showEdgeLabels && e.kind) {
+        const fontSize = Math.max(7, 8 / Math.pow(k, 0.75));
+        ctx.font = `400 ${fontSize}px "JetBrains Mono", monospace`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const label = e.kind.toLowerCase();
+        const tw = ctx.measureText(label).width;
+        ctx.fillStyle = 'rgba(13,17,23,0.8)';
+        roundRect(ctx, cpx - tw / 2 - 3, cpy - fontSize / 2 - 2, tw + 6, fontSize + 4, 3);
+        ctx.fill();
+        ctx.fillStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},0.7)`;
+        ctx.fillText(label, cpx, cpy);
+      }
     }
   }
 
   // --- 3. Draw node glow + body ---
+  const now = performance.now();
   for (const n of nodes) {
     if (!n.visible) continue;
+    if (!inViewport(n.x, n.y, n.radius * 5)) continue; // viewport cull with glow margin
+
     const color = KIND_COLORS[n.kind] || '#8b949e';
     const rgb = KIND_RGB[n.kind] || { r: 139, g: 148, b: 158 };
     const isActive = activeNode && activeNode.id === n.id;
@@ -853,12 +939,13 @@ function renderGraph() {
     const r = n.radius;
     const screenR = r; // radius in world coords
 
-    // Glow (radial gradient) — only for highlighted or when no selection
+    // Glow (radial gradient) — softer two-stop falloff
     if (ha > 0.3) {
-      const glowR = screenR * (isActive ? 4 : 2.5);
-      const glowAlpha = ha * (isActive ? 0.35 : 0.15);
-      const grad = ctx.createRadialGradient(n.x, n.y, screenR * 0.5, n.x, n.y, glowR);
+      const glowR = screenR * (isActive ? 4.5 : 2.5);
+      const glowAlpha = ha * (isActive ? 0.4 : 0.15);
+      const grad = ctx.createRadialGradient(n.x, n.y, screenR * 0.3, n.x, n.y, glowR);
       grad.addColorStop(0, `rgba(${rgb.r},${rgb.g},${rgb.b},${glowAlpha})`);
+      grad.addColorStop(0.5, `rgba(${rgb.r},${rgb.g},${rgb.b},${glowAlpha * 0.3})`);
       grad.addColorStop(1, `rgba(${rgb.r},${rgb.g},${rgb.b},0)`);
       ctx.fillStyle = grad;
       ctx.beginPath();
@@ -870,7 +957,13 @@ function renderGraph() {
     const bodyAlpha = activeNode
       ? (isActive ? 1.0 : (isConnected ? 0.9 : 0.08 + ha * 0.1))
       : 0.85;
-    const scale = isActive ? 1.35 : (isConnected && activeNode ? 1.1 : 1.0);
+
+    // Pulse animation for selected node
+    let scale = isActive ? 1.35 : (isConnected && activeNode ? 1.1 : 1.0);
+    if (isActive && selectedNode && selectedNode.id === n.id) {
+      scale += Math.sin((now - (graphState.startTime || 0)) * 0.003) * 0.08;
+    }
+
     ctx.fillStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},${bodyAlpha})`;
     ctx.beginPath();
     if (n.kind === 'package') {
@@ -887,6 +980,14 @@ function renderGraph() {
       ctx.arc(n.x, n.y, screenR * scale, 0, Math.PI * 2);
     }
     ctx.fill();
+
+    // Subtle colored border ring on visible nodes
+    if (!activeNode || isActive || isConnected) {
+      const borderAlpha = isActive ? 0.7 : (isConnected ? 0.4 : bodyAlpha * 0.2);
+      ctx.strokeStyle = `rgba(${rgb.r},${rgb.g},${rgb.b},${borderAlpha})`;
+      ctx.lineWidth = (isActive ? 1.5 : 0.5) / k;
+      ctx.stroke();
+    }
 
     // White ring on active/selected
     if (isActive) {
@@ -915,6 +1016,7 @@ function renderGraph() {
 
   for (const n of nodes) {
     if (!n.visible) continue;
+    if (!inViewport(n.x, n.y, n.radius + 40)) continue; // viewport cull labels
 
     const isActive = activeNode && activeNode.id === n.id;
     const isConnected = connectedSet.has(n.id);
@@ -997,6 +1099,73 @@ function renderGraph() {
       ctx.fillText(lines[i], x0, y0 + i * lh);
     }
   }
+
+  // --- 6. Minimap overview ---
+  {
+    const mmW = 140, mmH = 90;
+    const mmPad = 12;
+    const mmX = width - mmW - mmPad;
+    const mmY = mmPad;
+
+    // Bounding box of all visible nodes
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    let mmCount = 0;
+    for (const n of nodes) {
+      if (!n.visible) continue;
+      mmCount++;
+      if (n.x < minX) minX = n.x;
+      if (n.y < minY) minY = n.y;
+      if (n.x > maxX) maxX = n.x;
+      if (n.y > maxY) maxY = n.y;
+    }
+
+    if (mmCount > 2) {
+      const graphW = (maxX - minX) || 1;
+      const graphH = (maxY - minY) || 1;
+      const mmScale = Math.min((mmW - 16) / graphW, (mmH - 16) / graphH);
+
+      // Background
+      ctx.fillStyle = 'rgba(13,17,23,0.85)';
+      roundRect(ctx, mmX, mmY, mmW, mmH, 6);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(48,54,61,0.8)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Node dots
+      const mmOffX = mmX + mmW / 2 - ((minX + maxX) / 2) * mmScale;
+      const mmOffY = mmY + mmH / 2 - ((minY + maxY) / 2) * mmScale;
+      for (const n of nodes) {
+        if (!n.visible) continue;
+        const mx = n.x * mmScale + mmOffX;
+        const my = n.y * mmScale + mmOffY;
+        if (mx < mmX + 2 || mx > mmX + mmW - 2 || my < mmY + 2 || my > mmY + mmH - 2) continue;
+        const mmRgb = KIND_RGB[n.kind] || { r: 139, g: 148, b: 158 };
+        const dotAlpha = activeNode ? (connectedSet.has(n.id) ? 0.9 : 0.2) : 0.6;
+        ctx.fillStyle = `rgba(${mmRgb.r},${mmRgb.g},${mmRgb.b},${dotAlpha})`;
+        ctx.beginPath();
+        ctx.arc(mx, my, Math.max(1, n.radius * mmScale * 0.5), 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Viewport indicator rectangle
+      const vpL = (-transform.x / k) * mmScale + mmOffX;
+      const vpT = (-transform.y / k) * mmScale + mmOffY;
+      const vpW = (width / k) * mmScale;
+      const vpH = (height / k) * mmScale;
+      // Clamp to minimap bounds
+      const clampL = Math.max(mmX + 1, Math.min(vpL, mmX + mmW - 2));
+      const clampT = Math.max(mmY + 1, Math.min(vpT, mmY + mmH - 2));
+      const clampW = Math.min(vpW, mmX + mmW - 1 - clampL);
+      const clampH = Math.min(vpH, mmY + mmH - 1 - clampT);
+      if (clampW > 2 && clampH > 2) {
+        ctx.strokeStyle = 'rgba(88,166,255,0.5)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(clampL, clampT, clampW, clampH);
+      }
+    }
+  }
+
   ctx.restore();
 }
 
