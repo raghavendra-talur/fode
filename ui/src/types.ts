@@ -58,10 +58,24 @@ export interface PkgGroup {
 
 export interface FocusView {
   center: Entity
-  incoming: Reference[]
+  callers: Reference[]
+  referenced_by: Reference[]
+  implementations: Reference[]
+  satisfies: Reference[]
   same_pkg: SamePkgEntry[]
   same_module: PkgGroup[]
   external_deps: string[]
+}
+
+export interface Ref {
+  start: number
+  end: number
+  to_id: string
+}
+
+export interface DeadCodeReport {
+  dead: Entity[]
+  exported_unused: Entity[]
 }
 
 export interface GraphNode {

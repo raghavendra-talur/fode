@@ -1,10 +1,12 @@
 import type {
   ApplyResult,
   Comment,
+  DeadCodeReport,
   Edit,
   Entity,
   FocusView,
   GraphData,
+  Ref,
   Repo,
   RepoSummary,
   Review,
@@ -45,6 +47,8 @@ export const api = {
   repoGraph: (id: number) => get<GraphData>(`/api/repos/${id}/graph`),
   getEntity: (id: string) => get<Entity>(`/api/entities?${entityQS(id)}`),
   entityFocus: (id: string) => get<FocusView>(`/api/entities/focus?${entityQS(id)}`),
+  entityRefs: (id: string) => get<Ref[]>(`/api/entities/refs?${entityQS(id)}`),
+  deadCode: (id: number) => get<DeadCodeReport>(`/api/repos/${id}/deadcode`),
 
   // reviews
   getReview: (id: string) =>

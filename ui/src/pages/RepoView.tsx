@@ -7,8 +7,9 @@ import Search from '../features/search/Search'
 import BrowseGrid from '../features/browse/BrowseGrid'
 import Focus from '../features/focus/Focus'
 import Graph from '../features/graph/Graph'
+import DeadCode from '../features/deadcode/DeadCode'
 
-type ViewMode = 'browse' | 'graph'
+type ViewMode = 'browse' | 'graph' | 'deadcode'
 
 export default function RepoView() {
   const { id } = useParams<{ id: string }>()
@@ -92,6 +93,12 @@ export default function RepoView() {
             >
               Graph
             </button>
+            <button
+              className={`view-btn ${view === 'deadcode' ? 'view-btn-active' : ''}`}
+              onClick={() => setView('deadcode')}
+            >
+              Dead code
+            </button>
           </div>
           {view === 'browse' ? (
             <BrowseGrid
@@ -99,8 +106,10 @@ export default function RepoView() {
               reviewMap={reviewMap}
               onSelect={setFocusedID}
             />
-          ) : (
+          ) : view === 'graph' ? (
             <Graph repoID={repoID} onSelect={setFocusedID} />
+          ) : (
+            <DeadCode repoID={repoID} onSelect={setFocusedID} />
           )}
         </>
       )}

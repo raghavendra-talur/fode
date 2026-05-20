@@ -5,6 +5,8 @@ import KindBadge from '../../components/KindBadge'
 import ReviewPanel from '../review/ReviewPanel'
 import Comments from '../review/Comments'
 import EditPanel from '../editor/EditPanel'
+import SourceView from './SourceView'
+import type { Reference } from '../../types'
 
 interface Props {
   entityID: string
@@ -29,7 +31,29 @@ export default function Focus({ entityID, repoID, onSelect, onClose }: Props) {
   if (focus.error || !focus.data)
     return <p className="error">{(focus.error as Error)?.message ?? 'Not found'}</p>
 
-  const { center, incoming, same_pkg, same_module, external_deps } = focus.data
+  const {
+    center,
+    callers,
+    referenced_by,
+    implementations,
+    satisfies,
+    same_pkg,
+    same_module,
+    external_deps,
+  } = focus.data
+
+  const refGroup = (refs: Reference[]) => (
+    <ul>
+      {refs.map((ref) => (
+        <li key={ref.entity.id}>
+          <button className="entity-link" onClick={() => onSelect(ref.entity.id)}>
+            <KindBadge kind={ref.entity.kind} />
+            <span className="entity-name">{ref.entity.name}</span>
+          </button>
+        </li>
+      ))}
+    </ul>
+  )
 
   return (
     <div className="focus">
@@ -39,25 +63,26 @@ export default function Focus({ entityID, repoID, onSelect, onClose }: Props) {
 
       <div className="three-tier">
         <aside className="tier incoming">
-          <h3>Called by &amp; referenced by</h3>
-          {incoming.length === 0 ? (
-            <p className="muted">No incoming references.</p>
+          <h3>Callers</h3>
+          {callers.length === 0 ? (
+            <p className="muted">No callers.</p>
           ) : (
-            <ul>
-              {incoming.map((ref) => (
-                <li key={ref.entity.id + ref.relation}>
-                  <button
-                    className="entity-link"
-                    onClick={() => onSelect(ref.entity.id)}
-                  >
-                    <KindBadge kind={ref.entity.kind} />
-                    <span className="entity-name">{ref.entity.name}</span>
-                    <span className="muted">{ref.relation}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
+            refGroup(callers)
           )}
+
+          <h3>Referenced by</h3>
+          {referenced_by.length === 0 ? (
+            <p className="muted">No references.</p>
+          ) : (
+            refGroup(referenced_by)
+          )}
+
+          {implementations.length > 0 ? (
+            <>
+              <h3>Implementations</h3>
+              {refGroup(implementations)}
+            </>
+          ) : null}
         </aside>
 
         <section className="tier center">
@@ -93,7 +118,11 @@ export default function Focus({ entityID, repoID, onSelect, onClose }: Props) {
               onCancel={() => setEditing(false)}
             />
           ) : (
-            <pre className="source">{center.source}</pre>
+            <SourceView
+              entityID={center.id}
+              source={center.source}
+              onSelect={onSelect}
+            />
           )}
 
           <ReviewPanel entityID={center.id} repoID={repoID} />
@@ -101,6 +130,13 @@ export default function Focus({ entityID, repoID, onSelect, onClose }: Props) {
         </section>
 
         <aside className="tier outgoing">
+          {satisfies.length > 0 ? (
+            <>
+              <h3>Satisfies / implements</h3>
+              {refGroup(satisfies)}
+            </>
+          ) : null}
+
           <h3>Same package</h3>
           {same_pkg.length === 0 ? (
             <p className="muted">No references in same package.</p>

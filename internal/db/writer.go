@@ -94,6 +94,20 @@ func WriteAnalysis(d *sql.DB, result *analyzer.Result) (int64, error) {
 		}
 	}
 
+	refStmt, err := tx.Prepare(`
+		INSERT INTO refs (entity_id, start_off, end_off, to_id)
+		VALUES (?, ?, ?, ?)
+	`)
+	if err != nil {
+		return 0, err
+	}
+	defer refStmt.Close()
+	for _, ref := range result.Refs {
+		if _, err := refStmt.Exec(ref.EntityID, ref.Start, ref.End, ref.ToID); err != nil {
+			return 0, fmt.Errorf("insert ref: %w", err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}

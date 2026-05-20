@@ -20,8 +20,11 @@ func extractRelationsFile(
 	relPath string,
 	defIDs map[types.Object]string,
 	modulePath string,
-) ([]Relation, map[string][]string) {
+	entityStart map[string]int,
+	entityLen map[string]int,
+) ([]Relation, map[string][]string, []Ref) {
 	var rels []Relation
+	var refs []Ref
 	deps := make(map[string][]string)
 	fset := pkg.Fset
 
@@ -67,6 +70,16 @@ func extractRelationsFile(
 					kind = RelCalls
 				}
 				rels = append(rels, Relation{FromID: entityID, ToID: tid, Kind: kind})
+
+				// Record the identifier's position relative to the enclosing
+				// entity's source so the UI can make it a clickable link. Drop
+				// out-of-range offsets (multi-spec type/var blocks attribute
+				// every spec to the first spec's entity).
+				start := fset.Position(x.Pos()).Offset - entityStart[entityID]
+				end := fset.Position(x.End()).Offset - entityStart[entityID]
+				if start >= 0 && end > start && end <= entityLen[entityID] {
+					refs = append(refs, Ref{EntityID: entityID, Start: start, End: end, ToID: tid})
+				}
 			case *ast.SelectorExpr:
 				if ident, ok := x.X.(*ast.Ident); ok {
 					if impPath, exists := importMap[ident.Name]; exists {
@@ -85,7 +98,7 @@ func extractRelationsFile(
 		}
 	}
 
-	return rels, deps
+	return rels, deps, refs
 }
 
 func buildImportMap(file *ast.File) map[string]string {

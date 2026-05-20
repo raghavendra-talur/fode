@@ -32,9 +32,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/repos/{id}/search", s.search)
 	mux.HandleFunc("GET /api/repos/{id}/graph", s.repoGraph)
 	mux.HandleFunc("GET /api/repos/{id}/reviews", s.listRepoReviews)
+	mux.HandleFunc("GET /api/repos/{id}/deadcode", s.repoDeadCode)
 	mux.HandleFunc("GET /api/entities", s.getEntity)
 	mux.HandleFunc("GET /api/entities/focus", s.entityFocus)
 	mux.HandleFunc("GET /api/entities/source", s.entitySource)
+	mux.HandleFunc("GET /api/entities/refs", s.entityRefs)
 	mux.HandleFunc("GET /api/entities/review", s.getReview)
 	mux.HandleFunc("PUT /api/entities/review", s.putReview)
 	mux.HandleFunc("DELETE /api/entities/review", s.deleteReview)
@@ -209,6 +211,38 @@ func (s *Server) entityFocus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, v)
+}
+
+func (s *Server) repoDeadCode(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	report, err := db.DeadCode(s.db, id)
+	if errors.Is(err, db.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "repo not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) entityRefs(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "id is required")
+		return
+	}
+	refs, err := db.ListRefs(s.db, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, refs)
 }
 
 func (s *Server) entitySource(w http.ResponseWriter, r *http.Request) {

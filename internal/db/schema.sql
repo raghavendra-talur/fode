@@ -53,6 +53,17 @@ CREATE TABLE IF NOT EXISTS external_deps (
   PRIMARY KEY (entity_id, import_path)
 );
 
+-- Resolved identifier occurrences inside an entity's source. start_off/end_off
+-- are byte offsets relative to the entity source. Derived data, wiped via the
+-- entities cascade like external_deps; powers go-to-definition in the UI.
+CREATE TABLE IF NOT EXISTS refs (
+  entity_id   TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+  start_off   INTEGER NOT NULL,
+  end_off     INTEGER NOT NULL,
+  to_id       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_refs_entity ON refs(entity_id);
+
 -- Reviewer surface
 CREATE TABLE IF NOT EXISTS reviews (
   entity_id   TEXT PRIMARY KEY,

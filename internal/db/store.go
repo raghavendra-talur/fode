@@ -6,6 +6,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/raghavendra-talur/fode/internal/analyzer"
 )
@@ -55,11 +56,29 @@ type PkgGroup struct {
 }
 
 type FocusView struct {
-	Center       analyzer.Entity `json:"center"`
-	Incoming     []Reference     `json:"incoming"`
-	SamePkg      []SamePkgEntry  `json:"same_pkg"`
-	SameModule   []PkgGroup      `json:"same_module"`
-	ExternalDeps []string        `json:"external_deps"`
+	Center          analyzer.Entity `json:"center"`
+	Callers         []Reference     `json:"callers"`
+	ReferencedBy    []Reference     `json:"referenced_by"`
+	Implementations []Reference     `json:"implementations"`
+	Satisfies       []Reference     `json:"satisfies"`
+	SamePkg         []SamePkgEntry  `json:"same_pkg"`
+	SameModule      []PkgGroup      `json:"same_module"`
+	ExternalDeps    []string        `json:"external_deps"`
+}
+
+// Ref is a clickable identifier span in an entity's source: byte offsets
+// relative to the entity source plus the entity it resolves to.
+type Ref struct {
+	Start int    `json:"start"`
+	End   int    `json:"end"`
+	ToID  string `json:"to_id"`
+}
+
+// DeadCodeReport partitions entities with no incoming relations into likely
+// dead code (unexported) and unused-but-exported (possible public API).
+type DeadCodeReport struct {
+	Dead           []analyzer.Entity `json:"dead"`
+	ExportedUnused []analyzer.Entity `json:"exported_unused"`
 }
 
 func ListRepos(d *sql.DB) ([]RepoSummary, error) {
@@ -203,6 +222,26 @@ func FocusOf(d *sql.DB, entityID string) (*FocusView, error) {
 	if err != nil {
 		return nil, err
 	}
+	callers := []Reference{}
+	referencedBy := []Reference{}
+	implementations := []Reference{}
+	for _, ref := range incoming {
+		switch ref.Relation {
+		case analyzer.RelCalls:
+			callers = append(callers, ref)
+		case analyzer.RelSatisfies:
+			implementations = append(implementations, ref)
+		default:
+			referencedBy = append(referencedBy, ref)
+		}
+	}
+
+	// Outgoing Satisfies are surfaced separately; everything else is bucketed
+	// into the same-package / same-module tiers.
+	satisfies, err := listOutgoingByKind(d, entityID, analyzer.RelSatisfies)
+	if err != nil {
+		return nil, err
+	}
 
 	outgoing, err := listOutgoingTargets(d, entityID)
 	if err != nil {
@@ -253,11 +292,14 @@ func FocusOf(d *sql.DB, entityID string) (*FocusView, error) {
 	}
 
 	return &FocusView{
-		Center:       *center,
-		Incoming:     incoming,
-		SamePkg:      samePkg,
-		SameModule:   sameModule,
-		ExternalDeps: external,
+		Center:          *center,
+		Callers:         callers,
+		ReferencedBy:    referencedBy,
+		Implementations: implementations,
+		Satisfies:       satisfies,
+		SamePkg:         samePkg,
+		SameModule:      sameModule,
+		ExternalDeps:    external,
 	}, nil
 }
 
@@ -284,19 +326,21 @@ func listIncoming(d *sql.DB, entityID string) ([]Reference, error) {
 			&rk); err != nil {
 			return nil, err
 		}
-		out = append(out, Reference{Entity: e, Relation: relationLabel(rk)})
+		out = append(out, Reference{Entity: e, Relation: rk})
 	}
 	return out, rows.Err()
 }
 
+// listOutgoingTargets returns the entities this entity references, excluding
+// Satisfies relations (those are surfaced separately by listOutgoingByKind).
 func listOutgoingTargets(d *sql.DB, entityID string) ([]analyzer.Entity, error) {
 	rows, err := d.Query(`
 		SELECT DISTINCT e.id, e.name, e.kind, e.file, e.line, e.end_line, e.byte_start, e.byte_end,
 		       e.source, e.signature, e.package, e.package_dir, e.doc_comment
 		FROM relations r
 		JOIN entities e ON e.id = r.to_id
-		WHERE r.from_id = ?
-	`, entityID)
+		WHERE r.from_id = ? AND r.kind != ?
+	`, entityID, analyzer.RelSatisfies)
 	if err != nil {
 		return nil, err
 	}
@@ -308,6 +352,32 @@ func listOutgoingTargets(d *sql.DB, entityID string) ([]analyzer.Entity, error) 
 			return nil, err
 		}
 		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// listOutgoingByKind returns the entities this entity points at via a specific
+// relation kind, as References (the relation field echoes the kind).
+func listOutgoingByKind(d *sql.DB, entityID, kind string) ([]Reference, error) {
+	rows, err := d.Query(`
+		SELECT e.id, e.name, e.kind, e.file, e.line, e.end_line, e.byte_start, e.byte_end,
+		       e.source, e.signature, e.package, e.package_dir, e.doc_comment
+		FROM relations r
+		JOIN entities e ON e.id = r.to_id
+		WHERE r.from_id = ? AND r.kind = ?
+		ORDER BY e.file, e.line
+	`, entityID, kind)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Reference{}
+	for rows.Next() {
+		e, err := scanEntity(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, Reference{Entity: e, Relation: kind})
 	}
 	return out, rows.Err()
 }
@@ -460,13 +530,117 @@ func BuildGraph(d *sql.DB, repoID int64) (*GraphData, error) {
 
 func pkgNodeID(dir string) string { return "pkg::" + dir }
 
-func relationLabel(k string) string {
-	switch k {
-	case analyzer.RelCalls:
-		return "called by"
-	case analyzer.RelReferences:
-		return "referenced by"
-	default:
-		return "related to"
+// ListRefs returns the clickable identifier spans inside an entity's source,
+// ordered by start offset.
+func ListRefs(d *sql.DB, entityID string) ([]Ref, error) {
+	rows, err := d.Query(`
+		SELECT start_off, end_off, to_id FROM refs
+		WHERE entity_id = ? ORDER BY start_off
+	`, entityID)
+	if err != nil {
+		return nil, err
 	}
+	defer rows.Close()
+	out := []Ref{}
+	for rows.Next() {
+		var r Ref
+		if err := rows.Scan(&r.Start, &r.End, &r.ToID); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// DeadCode reports entities with no incoming relations, split into likely dead
+// code (unexported) and unused-but-exported (possible public API). main/init
+// functions and methods on interface-satisfying types are excluded — the latter
+// may be reached only through an interface, which has no direct Calls relation.
+func DeadCode(d *sql.DB, repoID int64) (*DeadCodeReport, error) {
+	if _, err := GetRepo(d, repoID); err != nil {
+		return nil, err
+	}
+
+	// Receiver types that satisfy some interface, keyed by package_dir + name.
+	satRows, err := d.Query(`
+		SELECT DISTINCT e.package_dir, e.name
+		FROM relations r JOIN entities e ON e.id = r.from_id
+		WHERE r.repo_id = ? AND r.kind = ?
+	`, repoID, analyzer.RelSatisfies)
+	if err != nil {
+		return nil, err
+	}
+	defer satRows.Close()
+	satisfying := map[string]bool{}
+	for satRows.Next() {
+		var dir, name string
+		if err := satRows.Scan(&dir, &name); err != nil {
+			return nil, err
+		}
+		satisfying[dir+"\x00"+name] = true
+	}
+	if err := satRows.Err(); err != nil {
+		return nil, err
+	}
+
+	rows, err := d.Query(`
+		SELECT id, name, kind, file, line, end_line, byte_start, byte_end,
+		       source, signature, package, package_dir, doc_comment
+		FROM entities e
+		WHERE e.repo_id = ?
+		  AND NOT EXISTS (SELECT 1 FROM relations r WHERE r.to_id = e.id)
+		ORDER BY e.file, e.line
+	`, repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	report := &DeadCodeReport{Dead: []analyzer.Entity{}, ExportedUnused: []analyzer.Entity{}}
+	for rows.Next() {
+		e, err := scanEntity(rows)
+		if err != nil {
+			return nil, err
+		}
+		if e.Kind == analyzer.KindFunction && (e.Name == "main" || e.Name == "init") {
+			continue
+		}
+		if e.Kind == analyzer.KindMethod {
+			recv, _ := splitMethodName(e.Name)
+			if satisfying[e.PackageDir+"\x00"+recv] {
+				continue
+			}
+		}
+		if isExportedName(e.Name) {
+			report.ExportedUnused = append(report.ExportedUnused, e)
+		} else {
+			report.Dead = append(report.Dead, e)
+		}
+	}
+	return report, rows.Err()
+}
+
+// splitMethodName splits "*Recv.Method" or "Recv.Method" into the receiver base
+// type name (sans pointer/generic decoration) and the method name.
+func splitMethodName(name string) (recv, method string) {
+	dot := strings.IndexByte(name, '.')
+	if dot < 0 {
+		return "", name
+	}
+	recv = strings.TrimPrefix(name[:dot], "*")
+	if b := strings.IndexByte(recv, '['); b >= 0 {
+		recv = recv[:b]
+	}
+	return recv, name[dot+1:]
+}
+
+// isExportedName reports whether the entity name is exported, judged by the last
+// segment (the method name for methods).
+func isExportedName(name string) bool {
+	_, last := splitMethodName(name)
+	if last == "" {
+		return false
+	}
+	r := []rune(last)[0]
+	return unicode.IsUpper(r)
 }

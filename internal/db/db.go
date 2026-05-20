@@ -14,7 +14,7 @@ import (
 //go:embed schema.sql
 var schemaSQL string
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 func Open(path string) (*sql.DB, error) {
 	dsn := fmt.Sprintf("file:%s?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)", path)

@@ -366,6 +366,33 @@ select {
   margin: 0;
 }
 
+/* Clickable identifier (go-to-definition) inside a source view. Inherits the
+   monospace flow so it sits inline with surrounding code. */
+.src-ref {
+  font: inherit;
+  color: var(--accent);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  border-radius: 2px;
+}
+.src-ref:hover {
+  background: var(--card-hover);
+  text-decoration: underline;
+}
+
+.deadcode {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+.deadcode-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
 .pkg-group {
   display: grid;
   grid-template-columns: auto 1fr auto;

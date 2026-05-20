@@ -54,6 +54,17 @@ type Relation struct {
 	Kind   string `json:"kind"`
 }
 
+// Ref is a single resolved identifier occurrence inside an entity's source.
+// Start/End are byte offsets relative to the enclosing entity's source (not the
+// file), so the UI can slice the entity source directly. One Ref per occurrence
+// — unlike Relation, refs are not deduped.
+type Ref struct {
+	EntityID string `json:"entity_id"`
+	Start    int    `json:"start"`
+	End      int    `json:"end"`
+	ToID     string `json:"to_id"`
+}
+
 type RepoInfo struct {
 	Path       string `json:"path"`
 	Name       string `json:"name"`
@@ -64,6 +75,7 @@ type Result struct {
 	Repo         RepoInfo
 	Entities     []Entity
 	Relations    []Relation
+	Refs         []Ref
 	ExternalDeps map[string][]string // entity_id -> import paths
 }
 
@@ -138,7 +150,16 @@ func Analyze(repoPath string) (*Result, error) {
 		}
 	}
 
-	// Second pass: relations + external deps.
+	// entityStart maps entity ID -> its source byte_start, so the relations
+	// pass can express reference offsets relative to the entity source.
+	entityStart := make(map[string]int, len(result.Entities))
+	entityLen := make(map[string]int, len(result.Entities))
+	for _, e := range result.Entities {
+		entityStart[e.ID] = e.ByteStart
+		entityLen[e.ID] = e.ByteEnd - e.ByteStart
+	}
+
+	// Second pass: relations + external deps + refs.
 	type relKey struct{ from, to, kind string }
 	relSeen := make(map[relKey]bool)
 	for _, pkg := range pkgs {
@@ -153,7 +174,7 @@ func Analyze(repoPath string) (*Result, error) {
 			if !ok {
 				continue
 			}
-			rels, deps := extractRelationsFile(pkg, file, src, rel, defIDs, moduleName)
+			rels, deps, refs := extractRelationsFile(pkg, file, src, rel, defIDs, moduleName, entityStart, entityLen)
 			for _, r := range rels {
 				k := relKey{r.FromID, r.ToID, r.Kind}
 				if relSeen[k] {
@@ -162,6 +183,7 @@ func Analyze(repoPath string) (*Result, error) {
 				relSeen[k] = true
 				result.Relations = append(result.Relations, r)
 			}
+			result.Refs = append(result.Refs, refs...)
 			for eid, paths := range deps {
 				result.ExternalDeps[eid] = append(result.ExternalDeps[eid], paths...)
 			}
