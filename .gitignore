@@ -1,13 +1,12 @@
-# Rust / Cargo
-src-tauri/target/
+# Go
+bin/
 *.exe
-*.exe~
-*.dll
-*.so
-*.dylib
 
-# Node
+# Node (root-level only; ui/.gitignore handles ui/node_modules)
 node_modules/
+
+# fode runtime data
+.fode/
 
 # OS
 .DS_Store
